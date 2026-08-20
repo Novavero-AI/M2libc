@@ -112,6 +112,28 @@ struct __brk_region
 struct __brk_region __brk_regions[__BRK_REGION_MAX];
 int __brk_region_count;
 
+/* Scratch words NtAllocateVirtualMemory writes its by-reference arguments
+ * through, for __brk_region_new and __brk_region_commit below. Static, not
+ * calloc'd: calloc'ing them was the original bug here, found by running
+ * this for real rather than only compiling it. A freshly reserved region
+ * has committed == base -- nothing backed yet -- so the very first
+ * allocation _malloc_brk ever tries to satisfy from it (these four bytes,
+ * for one of these two scratch words) recurses straight back through
+ * malloc -> _malloc_add_new -> _malloc_brk -> __brk_region_commit for that
+ * SAME region, which cannot finish committing until this call already has,
+ * which cannot happen until the recursive call returns, which it never
+ * does. Measured directly: instrumented depth climbed 1, 2, 3... without
+ * end, and the unmodified build ran the real thread stack out and Windows
+ * raised STATUS_STACK_OVERFLOW, at exactly the point (chunk 7 of
+ * heap-grow-test.c, stage0-pe32's own test for this) where the image's own
+ * region first ran out and a second region's first commit was needed.
+ * Static storage exists from program start, asks nothing of the very
+ * allocator being extended, and these values are never needed past the one
+ * call that fills them, so nothing is lost by never putting them on the
+ * heap at all. */
+int __brk_scratch_addr[1];
+int __brk_scratch_size[1];
+
 /* Reserve a fresh region from the operating system: try __BRK_RESERVE
  * bytes, halving and retrying on failure -- how much contiguous address
  * space is free varies by what else shares it, measured varying between
@@ -123,34 +145,31 @@ int __brk_region_count;
 int __brk_region_new()
 {
 	int (*NtAllocateVirtualMemory)(int, int, int, int, int, int);
-	int* addr;
-	int* size;
 	int rc;
 	int try;
 
 	if(__brk_region_count >= __BRK_REGION_MAX) return -1;
 
 	NtAllocateVirtualMemory = __ntdll(NT_ALLOC);
-	addr = calloc(1, 4);
-	size = calloc(1, 4);
 	try = __BRK_RESERVE;
 	rc = -1;
 	while(try >= __BRK_SMALLEST)
 	{
-		addr[0] = 0;                  /* let Windows choose the base */
-		size[0] = try;
-		/* forwards: NtAllocateVirtualMemory(-1, addr, 0, size, MEM_RESERVE,
-		 *                                   PAGE_READWRITE) */
-		rc = NtAllocateVirtualMemory(__PAGE_READWRITE, __MEM_RESERVE, size, 0, addr, -1);
+		__brk_scratch_addr[0] = 0;    /* let Windows choose the base */
+		__brk_scratch_size[0] = try;
+		/* forwards: NtAllocateVirtualMemory(-1, __brk_scratch_addr, 0,
+		 *                                   __brk_scratch_size,
+		 *                                   MEM_RESERVE, PAGE_READWRITE) */
+		rc = NtAllocateVirtualMemory(__PAGE_READWRITE, __MEM_RESERVE, __brk_scratch_size, 0, __brk_scratch_addr, -1);
 		if(0 == rc) break;
 		try = try / 2;
 	}
 	if(0 != rc) return -1;
 
-	__brk_regions[__brk_region_count].base = addr[0];
-	__brk_regions[__brk_region_count].cursor = addr[0];
-	__brk_regions[__brk_region_count].committed = addr[0];
-	__brk_regions[__brk_region_count].reserved = addr[0] + try;
+	__brk_regions[__brk_region_count].base = __brk_scratch_addr[0];
+	__brk_regions[__brk_region_count].cursor = __brk_scratch_addr[0];
+	__brk_regions[__brk_region_count].committed = __brk_scratch_addr[0];
+	__brk_regions[__brk_region_count].reserved = __brk_scratch_addr[0] + try;
 	__brk_region_count = __brk_region_count + 1;
 	return 0;
 }
@@ -164,8 +183,6 @@ int __brk_region_new()
 int __brk_region_commit(int idx, unsigned size)
 {
 	int (*NtAllocateVirtualMemory)(int, int, int, int, int, int);
-	int* commit_addr;
-	int* commit_size;
 	long need;
 	int rc;
 
@@ -178,21 +195,24 @@ int __brk_region_commit(int idx, unsigned size)
 		need = __brk_regions[idx].reserved - __brk_regions[idx].committed;
 	}
 
-	commit_addr = calloc(1, 4);
-	commit_size = calloc(1, 4);
-	commit_addr[0] = __brk_regions[idx].committed;
-	commit_size[0] = need;
+	/* __brk_scratch_addr/_size, not a fresh calloc: see their own comment
+	 * above __brk_region_new. This call site is the one that actually hung
+	 * forever before that fix -- committing into a region whose first ever
+	 * allocation is the calloc these two scratch words used to be. */
+	__brk_scratch_addr[0] = __brk_regions[idx].committed;
+	__brk_scratch_size[0] = need;
 	NtAllocateVirtualMemory = __ntdll(NT_ALLOC);
-	/* forwards: NtAllocateVirtualMemory(-1, commit_addr, 0, commit_size,
-	 *                                   MEM_COMMIT, PAGE_READWRITE) */
-	rc = NtAllocateVirtualMemory(__PAGE_READWRITE, __MEM_COMMIT, commit_size, 0, commit_addr, -1);
+	/* forwards: NtAllocateVirtualMemory(-1, __brk_scratch_addr, 0,
+	 *                                   __brk_scratch_size, MEM_COMMIT,
+	 *                                   PAGE_READWRITE) */
+	rc = NtAllocateVirtualMemory(__PAGE_READWRITE, __MEM_COMMIT, __brk_scratch_size, 0, __brk_scratch_addr, -1);
 	if(0 != rc) return -1;
 
 	/* What was actually committed, read back rather than assumed: at or
 	 * below what was asked for at the bottom (already exact here, since
-	 * commit_addr was the region's own committed mark) and at or above it
-	 * at the top, since a partial page rounds up. */
-	__brk_regions[idx].committed = commit_addr[0] + commit_size[0];
+	 * __brk_scratch_addr was the region's own committed mark) and at or
+	 * above it at the top, since a partial page rounds up. */
+	__brk_regions[idx].committed = __brk_scratch_addr[0] + __brk_scratch_size[0];
 	return 0;
 }
 
