@@ -46,6 +46,197 @@ struct _malloc_node* _free_list;
  ********************************/
 long _malloc_ptr;
 long _brk_ptr;
+
+#ifdef __windows__
+/* The generic _malloc_brk below (the #else branch) treats brk() as one
+ * linear range with no notion of separate regions: it computes
+ * _malloc_ptr + size and trusts every byte between the old value and the
+ * new one is real memory, which only holds for as long as the whole heap
+ * lives inside one region brk() itself backs. On Windows that region is a
+ * PE image's own built-in section -- fixed-size, fixed-address, mapped by
+ * the loader before this program's first instruction -- and running past
+ * it does not fail cleanly the way the -1 check below expects; it walks
+ * off the end of mapped memory and faults on the next write, because
+ * nothing beneath brk() polices that boundary at all.
+ *
+ * A real, OS-backed brk() that grows past a fixed image was tried and
+ * measured broken in a different way: reserving fresh address space
+ * starting exactly where the image's section ended, so the whole heap
+ * would stay one contiguous range at one address, hit
+ * STATUS_CONFLICTING_ADDRESSES on real hardware -- something Windows or
+ * WOW64 places pages in, patchily, starting at the very first byte past a
+ * 128MB image, not in one solid block a different fixed address could have
+ * dodged. There is no fixed address immediately past the image reliably
+ * free to grow into.
+ *
+ * What actually works: stop insisting the heap is one contiguous range at
+ * all. This function's only real contract, looked at from its one caller's
+ * side (_malloc_add_new, which calls it twice in a row for a node and then
+ * its block, never assuming those two calls' results are adjacent to each
+ * other, let alone to any earlier call's), is "hand back size fresh, valid,
+ * writable bytes" -- not "hand back the next size bytes of one specific
+ * range". So this tracks a small list of regions instead of one number:
+ * the first is always the image's own built-in section, free and already
+ * real; once that is exhausted, a new region is reserved from the
+ * operating system wherever it will actually grant one (base 0 -- let
+ * Windows choose, since nothing needs it adjacent to anything any more)
+ * and committed a chunk at a time as bump allocation reaches into it.
+ * Nothing above this function -- not malloc, not calloc, not any caller in
+ * any program built for this platform -- needs to know the heap is more
+ * than one piece, because none of them ever relied on that beyond what this
+ * function was responsible for providing. */
+
+struct __brk_region
+{
+	long base;
+	long cursor;
+	long committed;
+	long reserved;
+};
+
+/* Where the image's own built-in section ends: IMAGE_BASE + IMAGE_SIZE, in
+ * whichever port's own PE header generator defines those (stage0-pe32's
+ * x86/Development/pe32hdr.py, for the port this was written against). Only
+ * region 0 uses this; every later region is sized by what the operating
+ * system actually granted, read back rather than assumed. */
+#define __HEAP_IMAGE_END 0x8400000
+
+#define __BRK_REGION_MAX 64
+#define __BRK_RESERVE    0x10000000   /* 256MB, halved on failure */
+#define __BRK_SMALLEST   0x01000000   /* below this, give up */
+#define __BRK_CHUNK      0x00100000   /* committed a chunk at a time, not a page at a time */
+#define __MEM_COMMIT     0x1000
+#define __MEM_RESERVE    0x2000
+#define __PAGE_READWRITE 4
+
+struct __brk_region __brk_regions[__BRK_REGION_MAX];
+int __brk_region_count;
+
+/* Reserve a fresh region from the operating system: try __BRK_RESERVE
+ * bytes, halving and retrying on failure -- how much contiguous address
+ * space is free varies by what else shares it, measured varying between
+ * environments for one fixed size already. Nothing requests a specific
+ * base; any address Windows will grant is as good as any other, since no
+ * caller of _malloc_brk has ever needed two separate calls' results to be
+ * adjacent. Returns 0 on success, -1 if even __BRK_SMALLEST could not be
+ * reserved anywhere or the region table is already full. */
+int __brk_region_new()
+{
+	int (*NtAllocateVirtualMemory)(int, int, int, int, int, int);
+	int* addr;
+	int* size;
+	int rc;
+	int try;
+
+	if(__brk_region_count >= __BRK_REGION_MAX) return -1;
+
+	NtAllocateVirtualMemory = __ntdll(NT_ALLOC);
+	addr = calloc(1, 4);
+	size = calloc(1, 4);
+	try = __BRK_RESERVE;
+	rc = -1;
+	while(try >= __BRK_SMALLEST)
+	{
+		addr[0] = 0;                  /* let Windows choose the base */
+		size[0] = try;
+		/* forwards: NtAllocateVirtualMemory(-1, addr, 0, size, MEM_RESERVE,
+		 *                                   PAGE_READWRITE) */
+		rc = NtAllocateVirtualMemory(__PAGE_READWRITE, __MEM_RESERVE, size, 0, addr, -1);
+		if(0 == rc) break;
+		try = try / 2;
+	}
+	if(0 != rc) return -1;
+
+	__brk_regions[__brk_region_count].base = addr[0];
+	__brk_regions[__brk_region_count].cursor = addr[0];
+	__brk_regions[__brk_region_count].committed = addr[0];
+	__brk_regions[__brk_region_count].reserved = addr[0] + try;
+	__brk_region_count = __brk_region_count + 1;
+	return 0;
+}
+
+/* Commit enough of region idx to cover its cursor plus size more bytes,
+ * rounding up by __BRK_CHUNK so a caller growing a few bytes at a time does
+ * not turn every single allocation past the image into its own syscall.
+ * Region 0, the image itself, never reaches this: its committed is
+ * initialised equal to its reserved, so the growth check below is always
+ * false for it. Returns 0 on success, -1 on failure. */
+int __brk_region_commit(int idx, unsigned size)
+{
+	int (*NtAllocateVirtualMemory)(int, int, int, int, int, int);
+	int* commit_addr;
+	int* commit_size;
+	long need;
+	int rc;
+
+	if(__brk_regions[idx].cursor + size <= __brk_regions[idx].committed) return 0;
+
+	need = __brk_regions[idx].cursor + size - __brk_regions[idx].committed;
+	need = need + __BRK_CHUNK;
+	if(__brk_regions[idx].committed + need > __brk_regions[idx].reserved)
+	{
+		need = __brk_regions[idx].reserved - __brk_regions[idx].committed;
+	}
+
+	commit_addr = calloc(1, 4);
+	commit_size = calloc(1, 4);
+	commit_addr[0] = __brk_regions[idx].committed;
+	commit_size[0] = need;
+	NtAllocateVirtualMemory = __ntdll(NT_ALLOC);
+	/* forwards: NtAllocateVirtualMemory(-1, commit_addr, 0, commit_size,
+	 *                                   MEM_COMMIT, PAGE_READWRITE) */
+	rc = NtAllocateVirtualMemory(__PAGE_READWRITE, __MEM_COMMIT, commit_size, 0, commit_addr, -1);
+	if(0 != rc) return -1;
+
+	/* What was actually committed, read back rather than assumed: at or
+	 * below what was asked for at the bottom (already exact here, since
+	 * commit_addr was the region's own committed mark) and at or above it
+	 * at the top, since a partial page rounds up. */
+	__brk_regions[idx].committed = commit_addr[0] + commit_size[0];
+	return 0;
+}
+
+void* _malloc_brk(unsigned size)
+{
+	int idx;
+
+	if(0 == __brk_region_count)
+	{
+		/* The image's own section: free, already zero, already writable,
+		 * for as long as it lasts. No syscall, the same as this always
+		 * was before there was ever a second region. */
+		__brk_regions[0].base = __heap_start();
+		__brk_regions[0].cursor = __heap_start();
+		__brk_regions[0].committed = __HEAP_IMAGE_END;
+		__brk_regions[0].reserved = __HEAP_IMAGE_END;
+		__brk_region_count = 1;
+	}
+
+	idx = __brk_region_count - 1;
+
+	if(__brk_regions[idx].cursor + size > __brk_regions[idx].reserved)
+	{
+		/* This region has no more room for a request this size, at all --
+		 * not "not yet committed", genuinely out of reserved address space.
+		 * Move on to a fresh region rather than trying to stretch this one:
+		 * an image-backed region cannot grow past its own declared size (it
+		 * is not a reservation, it is what the loader already mapped), and
+		 * an OS-backed one growing past what it reserved is exactly the
+		 * STATUS_CONFLICTING_ADDRESSES problem this design exists to avoid
+		 * by never assuming contiguity with anything in the first place. */
+		if(0 != __brk_region_new()) return 0;
+		idx = __brk_region_count - 1;
+	}
+
+	if(0 != __brk_region_commit(idx, size)) return 0;
+
+	long old = __brk_regions[idx].cursor;
+	__brk_regions[idx].cursor = __brk_regions[idx].cursor + size;
+	return old;
+}
+
+#else /* !__windows__ */
+
 void* _malloc_brk(unsigned size)
 {
 	if(NULL == _brk_ptr)
@@ -67,6 +258,7 @@ void* _malloc_brk(unsigned size)
 	_malloc_ptr = _malloc_ptr + size;
 	return old_malloc;
 }
+#endif /* __windows__ */
 
 void __init_malloc()
 {
