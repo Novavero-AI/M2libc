@@ -481,6 +481,29 @@ int waitpid(int pid, int* status_ptr, int options)
 	return pid;
 }
 
+/* Start a program, wait for it, and answer with what it exited with.
+ *
+ * This is the shape uefi/uefi.c gives the same operation, and it is deliberate
+ * that the name matches: a caller that cannot fork is written against spawn,
+ * and UEFI cannot fork either.  kaem has exactly one #ifdef in it for this,
+ * and reaching for the same name means that one #ifdef answers for both.
+ *
+ * The three lines are execve without the exit -- a shell has more script to
+ * read once the command is done.
+ */
+int spawn(char* file_name, char** argv, char** envp)
+{
+	int pid;
+	int* status;
+
+	pid = __spawn(file_name, argv, envp);
+	if(0 >= pid) return -1;
+
+	status = calloc(1, 4);
+	if(0 > waitpid(pid, status, 0)) return -1;
+	return status[0] / 256;
+}
+
 /* Start a program and become it, as far as anything watching can tell: this
  * does not return, and what this process exits with is what the child exited
  * with.  The image is not replaced, because no Windows call replaces one; the
