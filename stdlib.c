@@ -150,7 +150,7 @@ int __brk_region_new()
 
 	if(__brk_region_count >= __BRK_REGION_MAX) return -1;
 
-	NtAllocateVirtualMemory = __ntdll(NT_ALLOC);
+	NtAllocateVirtualMemory = __ntdll_resolve("NtAllocateVirtualMemory");
 	try = __BRK_RESERVE;
 	rc = -1;
 	while(try >= __BRK_SMALLEST)
@@ -201,7 +201,7 @@ int __brk_region_commit(int idx, unsigned size)
 	 * allocation is the calloc these two scratch words used to be. */
 	__brk_scratch_addr[0] = __brk_regions[idx].committed;
 	__brk_scratch_size[0] = need;
-	NtAllocateVirtualMemory = __ntdll(NT_ALLOC);
+	NtAllocateVirtualMemory = __ntdll_resolve("NtAllocateVirtualMemory");
 	/* forwards: NtAllocateVirtualMemory(-1, __brk_scratch_addr, 0,
 	 *                                   __brk_scratch_size, MEM_COMMIT,
 	 *                                   PAGE_READWRITE) */
