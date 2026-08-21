@@ -328,7 +328,7 @@ int __inheritable(int handle)
 	if(0 == handle) return 0;
 
 	out = calloc(1, 4);
-	NtDuplicateObject = __ntdll(NT_DUP);
+	NtDuplicateObject = __ntdll_resolve("NtDuplicateObject");
 	/* forwards: NtDuplicateObject(-1, handle, -1, out, 0, OBJ_INHERIT,
 	 *                             DUPLICATE_SAME_ACCESS) */
 	if(0 != NtDuplicateObject(2, 2, 0, out, -1, handle, -1)) return handle;
@@ -377,7 +377,7 @@ int __spawn_suspended(char* file_name, char** argv, char** envp, int* info)
 	env = __envblock(envp);
 	out = calloc(1, 4);
 
-	RtlCreateProcessParameters = __ntdll(NT_MAKEPARAMS);
+	RtlCreateProcessParameters = __ntdll_resolve("RtlCreateProcessParameters");
 	/* forwards: RtlCreateProcessParameters(out, image, NULL, NULL, cmd, env,
 	 *                                      NULL, NULL, NULL, NULL) */
 	rc = RtlCreateProcessParameters(0, 0, 0, 0, env, cmd, 0, 0, image, out);
@@ -407,7 +407,7 @@ int __spawn_suspended(char* file_name, char** argv, char** envp, int* info)
 
 	info[0] = 68;
 
-	RtlCreateUserProcess = __ntdll(NT_CREATEPROC);
+	RtlCreateUserProcess = __ntdll_resolve("RtlCreateUserProcess");
 	/* forwards: RtlCreateUserProcess(ntpath, OBJ_CASE_INSENSITIVE, params,
 	 *                                NULL, NULL, NULL, TRUE, NULL, NULL, info) */
 	rc = RtlCreateUserProcess(info, 0, 0, 1, 0, 0, 0, params, 0x40, ntpath);
@@ -434,7 +434,7 @@ int __spawn(char* file_name, char** argv, char** envp)
 	pid = __spawn_suspended(file_name, argv, envp, info);
 	if(0 >= pid) return -1;
 
-	NtResumeThread = __ntdll(NT_RESUME);
+	NtResumeThread = __ntdll_resolve("NtResumeThread");
 	thread = info[2];
 	/* forwards: NtResumeThread(thread, NULL) */
 	NtResumeThread(0, thread);
@@ -442,7 +442,7 @@ int __spawn(char* file_name, char** argv, char** envp)
 	/* The thread handle has done its one job.  The process handle is what
 	 * comes back and is the caller's; this one would otherwise be leaked a
 	 * handle at a time, once per child ever started. */
-	NtClose = __ntdll(NT_CLOSE);
+	NtClose = __ntdll_resolve("NtClose");
 	NtClose(thread);
 
 	return pid;
@@ -464,14 +464,14 @@ int waitpid(int pid, int* status_ptr, int options)
 
 	if(0 >= pid) return -1;
 
-	NtWaitForSingleObject = __ntdll(NT_WAIT);
+	NtWaitForSingleObject = __ntdll_resolve("NtWaitForSingleObject");
 	/* forwards: NtWaitForSingleObject(pid, FALSE, NULL) -- NULL is no timeout */
 	rc = NtWaitForSingleObject(0, 0, pid);
 	if(0 > rc) return -1;
 
 	/* PROCESS_BASIC_INFORMATION, class 0, with ExitStatus first */
 	basic = calloc(8, 4);
-	NtQueryInformationProcess = __ntdll(NT_QUERYPROC);
+	NtQueryInformationProcess = __ntdll_resolve("NtQueryInformationProcess");
 	/* forwards: NtQueryInformationProcess(pid, ProcessBasicInformation, basic,
 	 *                                     24, NULL) */
 	rc = NtQueryInformationProcess(0, 24, basic, 0, pid);
@@ -1009,9 +1009,9 @@ int execve(char* file_name, char** argv, char** envp)
  *   when the clone path itself cannot be made to work. x86/Development/
  *   wow64-clone-driver.md has the disassembly and every measurement in full.
  *
- * wine does not export RtlCloneUserProcess at all, so the slot stays 0 there,
- * which is checked rather than assumed: resolve_export returns 0 for a name
- * that is not in the export table.
+ * wine does not export RtlCloneUserProcess at all, so it resolves to 0
+ * there, which is checked rather than assumed: __ntdll_resolve returns 0
+ * for a name that is not in ntdll's export table.
  *
  * The parent would get the child's process handle, which is what waitpid here
  * takes -- POSIX would give a pid, and this is the same substitution as a file
@@ -1025,7 +1025,7 @@ int __clone_process()
 	int i;
 	int rc;
 
-	RtlCloneUserProcess = __ntdll(NT_CLONE);
+	RtlCloneUserProcess = __ntdll_resolve("RtlCloneUserProcess");
 	if(NULL == RtlCloneUserProcess) return -1;
 
 	/* RTL_USER_PROCESS_INFORMATION, as __spawn fills in */
@@ -1048,7 +1048,7 @@ int __clone_process()
 	/* The clone's first thread starts suspended, the same way the one
 	 * RtlCreateUserProcess makes does, so the child does not come back from
 	 * the call above until it is let go. */
-	NtResumeThread = __ntdll(NT_RESUME);
+	NtResumeThread = __ntdll_resolve("NtResumeThread");
 	thread = info[2];
 	/* forwards: NtResumeThread(thread, NULL) */
 	NtResumeThread(0, thread);
@@ -1071,7 +1071,7 @@ int __clone_process()
  * that happens the fault is one of thirteen fixed points, not a stack trace,
  * so the number this records is the whole diagnosis:
  *
- *   1  NT_CLONE (RtlCloneUserProcess) did not resolve at all
+ *   1  RtlCloneUserProcess did not resolve at all
  *   2  __wow64_selfpeb could not read this process's own 64-bit PEB
  *   3  the 64-bit ntdll.dll was not found in the 64-bit module list (wow64cpu.dll
  *      absent takes the plain-__clone_process fallback instead, not this path)
@@ -1144,9 +1144,8 @@ int __wow64fix_qinfo_status;
  *     pointer cannot name. Two ntdll32 exports resolve them: one for this
  *     process's own 64-bit PEB, NtWow64QueryInformationProcess64, and one
  *     for everything after that -- Ldr, the module list, each image's own
- *     PE32+ export directory -- NtWow64ReadVirtualMemory64. Slots
- *     NT_WOW64QINFO and NT_WOW64READVM resolve them. Every address involved
- *     from here down is
+ *     PE32+ export directory -- NtWow64ReadVirtualMemory64. Every address
+ *     involved from here down is
  *     genuinely 64 bits -- ntdll64 is ASLR'd independently and measured as
  *     high as 0x00007ffb55110000 -- and this dialect has no 64-bit int, so
  *     each one is carried as two ints (*_lo, *_hi) and added to with __qadd64,
@@ -1231,7 +1230,7 @@ int __wow64_selfhandle()
 	if(0 != __wow64_self_handle_have) return __wow64_self_handle_cache;
 
 	out = calloc(1, 4);
-	NtDuplicateObject = __ntdll(NT_DUP);
+	NtDuplicateObject = __ntdll_resolve("NtDuplicateObject");
 	/* forwards: NtDuplicateObject(-1, -1, -1, out, 0, 0,
 	 *                             DUPLICATE_SAME_ACCESS) */
 	__wow64fix_dup_status = NtDuplicateObject(2, 0, 0, out, -1, -1, -1);
@@ -1315,7 +1314,7 @@ int __wow64_rd64(int lo, int hi, int* buf, int len)
 	 * left as the caller-owned buf-sized pointer __inheritable-style calls
 	 * would use. */
 	scratch = __wow64_rd64_scratch;
-	NtWow64ReadVirtualMemory64 = __ntdll(NT_WOW64READVM);
+	NtWow64ReadVirtualMemory64 = __ntdll_resolve("NtWow64ReadVirtualMemory64");
 	/* forwards: NtWow64ReadVirtualMemory64(self, lo, hi, scratch, len, 0, got) --
 	 * everything read here is this process's own 64-bit view of itself, but
 	 * by the real handle above, not the -1 pseudo-handle. scratch, 16-aligned,
@@ -1538,7 +1537,7 @@ int __gate_init()
 	base = calloc(1, 4);
 	size = calloc(1, 4);
 	size[0] = 0x1000;
-	NtAllocateVirtualMemory = __ntdll(NT_ALLOC);
+	NtAllocateVirtualMemory = __ntdll_resolve("NtAllocateVirtualMemory");
 	/* forwards: NtAllocateVirtualMemory(-1, base, 0, size, MEM_COMMIT|
 	 *   MEM_RESERVE, PAGE_EXECUTE_READWRITE) -- -1 is NtCurrentProcess: the
 	 *   gate lives in this same process, not the clone's. */
@@ -1646,7 +1645,7 @@ int __wow64_selfpeb(int* hi_out)
 	retlen = calloc(4 + 16, 1);
 	retlen = __wow64_align16(retlen);
 	self = __wow64_selfhandle();
-	NtWow64QueryInformationProcess64 = __ntdll(NT_WOW64QINFO);
+	NtWow64QueryInformationProcess64 = __ntdll_resolve("NtWow64QueryInformationProcess64");
 	/* forwards: NtWow64QueryInformationProcess64(self, 0, info, 48, retlen) --
 	 * self, not -1: see __wow64_selfhandle's note on __wow64_rd64 above,
 	 * which this same call was the other half of that measurement. */
@@ -1694,7 +1693,7 @@ int __clone_process_wow64fix()
 	int rc;
 	int i;
 
-	RtlCloneUserProcess = __ntdll(NT_CLONE);
+	RtlCloneUserProcess = __ntdll_resolve("RtlCloneUserProcess");
 	if(NULL == RtlCloneUserProcess) { __wow64fix_fail_at = 1; return -1; }
 
 	/* -- resolve everything the fix needs before touching the clone at all -- */
@@ -1718,8 +1717,8 @@ int __clone_process_wow64fix()
 	 * because that can fail on genuine WOW64 for reasons unrelated to which
 	 * Windows this is), it is "there is no second, 64-bit image of anything
 	 * loaded in this process at all" -- exactly the shape this file already
-	 * uses for NT_CLONE itself, whose own slot comment notes it stays 0 on
-	 * wine rather than erroring the caller out. Fall back to the plain
+	 * uses for RtlCloneUserProcess itself, which resolves to NULL on Wine
+	 * rather than erroring the caller out. Fall back to the plain
 	 * clone, the same one __clone_process above already is and which its own
 	 * note argues should just work without WOW64 in the way: no gate, no
 	 * 64-bit resolution, none of it. Not tested against real 32-bit Windows
@@ -1791,7 +1790,7 @@ int __clone_process_wow64fix()
 	rc = __gate_call(gate, getctx_lo, getctx_hi[0], thread, 0, ctxA, 0);
 	if(0 != rc)
 	{
-		NtTerminateProcess = __ntdll(NT_EXIT);
+		NtTerminateProcess = __ntdll_resolve("NtTerminateProcess");
 		NtTerminateProcess(1, child);
 		__wow64fix_fail_at = 9;
 		return -1;
@@ -1813,7 +1812,7 @@ int __clone_process_wow64fix()
 	rc = __gate_call(gate, setctx_lo, setctx_hi[0], thread, 0, ctxB, 0);
 	if(0 != rc)
 	{
-		NtTerminateProcess = __ntdll(NT_EXIT);
+		NtTerminateProcess = __ntdll_resolve("NtTerminateProcess");
 		NtTerminateProcess(1, child);
 		__wow64fix_fail_at = 10;
 		return -1;
@@ -1829,8 +1828,8 @@ int __clone_process_wow64fix()
 	 * bit RunSimulatedCode's own entry tests to decide whether to reprogram
 	 * FS. Get first, so nothing already correct in the CPU-area CONTEXT
 	 * (Eip, Esp, the segment selectors) is stepped on -- only Eax changes. */
-	NtGetContextThread = __ntdll(NT_GETCONTEXT);
-	NtSetContextThread = __ntdll(NT_SETCONTEXT);
+	NtGetContextThread = __ntdll_resolve("NtGetContextThread");
+	NtSetContextThread = __ntdll_resolve("NtSetContextThread");
 	ctxA = calloc(0x2CC + 16, 1);
 	ctxA = __wow64_align16(ctxA);
 	i = 0;
@@ -1839,7 +1838,7 @@ int __clone_process_wow64fix()
 	rc = NtGetContextThread(ctxA, thread);
 	if(0 != rc)
 	{
-		NtTerminateProcess = __ntdll(NT_EXIT);
+		NtTerminateProcess = __ntdll_resolve("NtTerminateProcess");
 		NtTerminateProcess(1, child);
 		__wow64fix_fail_at = 11;
 		return -1;
@@ -1848,7 +1847,7 @@ int __clone_process_wow64fix()
 	rc = NtSetContextThread(ctxA, thread);
 	if(0 != rc)
 	{
-		NtTerminateProcess = __ntdll(NT_EXIT);
+		NtTerminateProcess = __ntdll_resolve("NtTerminateProcess");
 		NtTerminateProcess(1, child);
 		__wow64fix_fail_at = 12;
 		return -1;
@@ -1895,19 +1894,19 @@ int __clone_process_wow64fix()
 	zero = calloc(1, 4);
 	zero[0] = 0;
 	wrote = calloc(1, 4);
-	NtWriteVirtualMemory = __ntdll(NT_WRITEVM);
+	NtWriteVirtualMemory = __ntdll_resolve("NtWriteVirtualMemory");
 	/* forwards: NtWriteVirtualMemory(child, lock_addr, zero, 4, wrote) */
 	rc = NtWriteVirtualMemory(wrote, 4, zero, lock_addr, child);
 	if(0 != rc)
 	{
-		NtTerminateProcess = __ntdll(NT_EXIT);
+		NtTerminateProcess = __ntdll_resolve("NtTerminateProcess");
 		NtTerminateProcess(1, child);
 		__wow64fix_fail_at = 13;
 		return -1;
 	}
 
 	/* -- Step D: let it go -- */
-	NtResumeThread = __ntdll(NT_RESUME);
+	NtResumeThread = __ntdll_resolve("NtResumeThread");
 	/* forwards: NtResumeThread(thread, NULL) */
 	NtResumeThread(0, thread);
 
@@ -1915,7 +1914,7 @@ int __clone_process_wow64fix()
 	 * and fork()'s spawn+copy fallback's own (below) -- both already close
 	 * theirs; this one leaked it on every successful clone until now, one
 	 * handle per fork(). */
-	NtClose = __ntdll(NT_CLOSE);
+	NtClose = __ntdll_resolve("NtClose");
 	NtClose(thread);
 
 	return child;
@@ -1980,13 +1979,12 @@ int __clone_process_wow64fix()
  * exceptions."
  *
  * This is why the function is wired into fork() below now, ahead of the
- * spawn+copy path, whenever NT_CLONE resolves (RtlCloneUserProcess exists;
- * the slot comment already notes it is absent on Wine). A failure return
- * here after the clone succeeds terminates the half-set-up child first, so
- * falling back to spawn+copy never leaves an orphaned suspended process
- * behind. The spawn+copy path itself is untouched and is still what runs
- * whenever NT_CLONE fails to resolve, or whenever this function returns -1
- * for any other reason. */
+ * spawn+copy path, whenever RtlCloneUserProcess resolves (it is absent on
+ * Wine). A failure return here after the clone succeeds terminates the
+ * half-set-up child first, so falling back to spawn+copy never leaves an
+ * orphaned suspended process behind. The spawn+copy path itself is
+ * untouched and is still what runs whenever RtlCloneUserProcess fails to
+ * resolve, or whenever this function returns -1 for any other reason. */
 
 /* This process's own image path, out of the PEB, narrowed the way everything
  * else in this port narrows.  fork needs it because the only way to get a
@@ -2043,8 +2041,8 @@ char* __self_path()
  * DYNAMIC_BASE) -- so a pointer meant the same thing in both copies with no
  * fixups needed. It is gone, not merely unused: it was also the only thing
  * that made fork() work on Wine, where RtlCloneUserProcess is not exported
- * at all (NT_CLONE's own slot comment) and __clone_process_wow64fix's first
- * check fails before anything else runs. A caller on Wine gets -1 from
+ * at all and __clone_process_wow64fix's first check fails before anything
+ * else runs. A caller on Wine gets -1 from
  * fork() now. That is a real loss of what used to work there, traded
  * deliberately for one path instead of two to reason about everywhere
  * else -- not an oversight, and recoverable from git history if Wine

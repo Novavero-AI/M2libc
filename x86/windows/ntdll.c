@@ -345,7 +345,7 @@ int* __ntobject(char* path)
 	int* name;
 	int* oa;
 
-	RtlDosPathNameToNtPathName_U = __ntdll(NT_RTLPATH);
+	RtlDosPathNameToNtPathName_U = __ntdll_resolve("RtlDosPathNameToNtPathName_U");
 	name = calloc(2, 4);
 	wide = __widen(path);          /* not in the argument list: see above */
 

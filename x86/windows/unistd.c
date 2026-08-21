@@ -156,7 +156,7 @@ int unlink(char* filename)
 	oa = __ntobject(filename);
 	if(NULL == oa) return -1;
 
-	NtDeleteFile = __ntdll(NT_DELETE);
+	NtDeleteFile = __ntdll_resolve("NtDeleteFile");
 	if(0 != NtDeleteFile(oa)) return -1;
 	return 0;
 }
@@ -185,7 +185,7 @@ int access(char* pathname, int mode)
 
 	/* FILE_BASIC_INFORMATION: four timestamps and then FileAttributes */
 	basic = calloc(10, 4);
-	NtQueryAttributesFile = __ntdll(NT_QUERYATTR);
+	NtQueryAttributesFile = __ntdll_resolve("NtQueryAttributesFile");
 	/* forwards: NtQueryAttributesFile(oa, basic) */
 	if(0 != NtQueryAttributesFile(basic, oa)) return -1;
 
@@ -199,7 +199,7 @@ int chdir(char* path)
 	int (*RtlSetCurrentDirectory_U)(int);
 	int* dos;
 
-	RtlSetCurrentDirectory_U = __ntdll(NT_SETCWD);
+	RtlSetCurrentDirectory_U = __ntdll_resolve("RtlSetCurrentDirectory_U");
 	/* The one ntdll call here that wants a DOS path rather than an NT one:
 	 * it does the conversion itself, and keeps the DOS path for getcwd. */
 	dos = __dosustring(path);      /* not in the argument list: see ntdll.c */
@@ -230,7 +230,7 @@ int _getcwd(char* buf, int size)
 
 	w = calloc(size + 1, 2);
 	room = 2 * size;               /* not in the argument list: see ntdll.c */
-	RtlGetCurrentDirectory_U = __ntdll(NT_GETCWD);
+	RtlGetCurrentDirectory_U = __ntdll_resolve("RtlGetCurrentDirectory_U");
 	/* forwards: RtlGetCurrentDirectory_U(room, w) */
 	bytes = RtlGetCurrentDirectory_U(w, room);
 	if(0 == bytes) return -1;
@@ -282,7 +282,7 @@ int uname(struct utsname* unameData)
 	int* info;
 	int at;
 
-	RtlGetVersion = __ntdll(NT_VERSION);
+	RtlGetVersion = __ntdll_resolve("RtlGetVersion");
 	/* RTL_OSVERSIONINFOW: five words and then 128 UTF-16 characters */
 	info = calloc(69, 4);
 	info[0] = 276;

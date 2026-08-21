@@ -58,7 +58,7 @@ int mkdir(char* a, mode_t b)
 
 	iosb = calloc(2, 4);
 	handle = calloc(1, 4);
-	NtCreateFile = __ntdll(NT_CREATE);
+	NtCreateFile = __ntdll_resolve("NtCreateFile");
 
 	/* forwards: NtCreateFile(handle, FILE_LIST_DIRECTORY|SYNCHRONIZE, oa,
 	 *                        iosb, NULL, FILE_ATTRIBUTE_NORMAL,
@@ -67,7 +67,7 @@ int mkdir(char* a, mode_t b)
 	 *                        NULL, 0) */
 	if(0 != NtCreateFile(0, 0, 0x21, 2, 3, 0x80, 0, iosb, oa, 0x00100001, handle)) return -1;
 
-	NtClose = __ntdll(NT_CLOSE);
+	NtClose = __ntdll_resolve("NtClose");
 	h = handle[0];                 /* not in the argument list: see ntdll.c */
 	NtClose(h);
 	return 0;
