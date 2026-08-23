@@ -31,13 +31,32 @@
 #define S_IRUSR 00400
 #define S_IRWXU 00700
 
-int _open(char* name, int flag, int mode)
+int __open_handle(char* name, int flag, int mode)
 {
 	asm("lea_eax,[esp+DWORD] %12"
 	    "mov_eax,[eax]"
 	    "lea_ebx,[esp+DWORD] %8"
 	    "mov_ebx,[ebx]"
 	    "call %__open");
+}
+
+/* A file that could not be opened comes back from __open as 0, because that is
+ * what the handle slot NtCreateFile was given still holds and there is nothing
+ * further down to say it any other way.  Everything above expects the Linux
+ * answer instead -- a negative number -- and tests for exactly that: fcntl.c's
+ * open() turns a negative into errno and -1, and stdio.c's fopen() gives up on
+ * `0 > f`.  A plain 0 passes both, so without this a failed open produces a
+ * FILE built around handle 0, which is not the file that was asked for and not
+ * a file at all: 0, 1 and 2 are how this target spells the three standard
+ * streams.  A caller that only opens files it knows are there never noticed; a
+ * caller that opens a file to find out whether it is there -- kaem searching
+ * PATH is one -- was told yes every time. */
+int _open(char* name, int flag, int mode)
+{
+	int handle;
+	handle = __open_handle(name, flag, mode);
+	if(0 == handle) return -1;
+	return handle;
 }
 
 #define STDIN_FILENO  0
