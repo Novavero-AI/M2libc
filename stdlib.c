@@ -109,6 +109,20 @@ struct __brk_region
 #define __MEM_RESERVE    0x2000
 #define __PAGE_READWRITE 4
 
+/* What malloc returns has to be aligned for any object, and Windows checks
+ * some of it: the kernel captures the name a file call is given with a probe
+ * that fails an odd WCHAR buffer with STATUS_DATATYPE_MISALIGNMENT.  The
+ * image's region starts at __heap_start, which is wherever the program's data
+ * happened to end, at any byte, so its start is rounded up as well as every
+ * size.  8 is what Windows itself guarantees on x86, its
+ * MEMORY_ALLOCATION_ALIGNMENT. */
+#define __MALLOC_ALIGN   8
+
+long __malloc_align(long n)
+{
+	return ((n + __MALLOC_ALIGN - 1) / __MALLOC_ALIGN) * __MALLOC_ALIGN;
+}
+
 struct __brk_region __brk_regions[__BRK_REGION_MAX];
 int __brk_region_count;
 
@@ -225,13 +239,14 @@ void* _malloc_brk(unsigned size)
 		/* The image's own section: free, already zero, already writable,
 		 * for as long as it lasts. No syscall, the same as this always
 		 * was before there was ever a second region. */
-		__brk_regions[0].base = __heap_start();
-		__brk_regions[0].cursor = __heap_start();
+		__brk_regions[0].base = __malloc_align(__heap_start());
+		__brk_regions[0].cursor = __brk_regions[0].base;
 		__brk_regions[0].committed = __HEAP_IMAGE_END;
 		__brk_regions[0].reserved = __HEAP_IMAGE_END;
 		__brk_region_count = 1;
 	}
 
+	size = __malloc_align(size);
 	idx = __brk_region_count - 1;
 
 	if(__brk_regions[idx].cursor + size > __brk_regions[idx].reserved)
