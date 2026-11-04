@@ -1,5 +1,6 @@
 /* SPDX-FileCopyrightText: (C) 2016-2021 Jeremiah Orians
  * SPDX-FileCopyrightText: (C) 2026 Gavin John
+ * SPDX-FileCopyrightText: (C) 2026 Novavero AI Inc.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Additional permission under GNU GPL version 3 section 7:
