@@ -340,18 +340,10 @@ int mount(char* source, char* target, char* filesystemtype, SCM mountflags, void
  * way to fail is to run off the top of the image, which faults rather than
  * returning -1.
  *
- * That ceiling used to be the whole allocator's ceiling too, because
- * M2libc/stdlib.c's own _malloc_brk called this function and trusted its
- * return value directly. It no longer does: M2libc's own stdlib.c (a fork,
- * https://github.com/Pandapip1/M2libc, branch windows-malloc-brk -- see
- * .gitmodules) gives _malloc_brk a #ifdef __windows__ path that tracks
- * several regions rather than one linear range, growing past this image
- * into further, separately-reserved ones as needed, without ever asking
- * this brk() to pretend the image itself is bigger than it is. See that
- * comment for why -- a design that instead tried to make brk() grow, or one
- * that tried to make the image bigger, were both tried first and are
- * written up there, with what was actually wrong with each. This function's
- * own job stays exactly what it always was. */
+ * malloc does not stand on this.  The __windows__ _malloc_brk in stdlib.c
+ * keeps regions of its own, the image's section first and then regions it
+ * reserves from the system, because no address past the image is reliably
+ * free for brk to grow into; its comment says why. */
 long _the_brk;
 
 int brk(void* addr)
