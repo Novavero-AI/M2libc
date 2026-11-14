@@ -97,8 +97,9 @@ struct __brk_region
 /* Where the image's own built-in section ends: IMAGE_BASE + IMAGE_SIZE, in
  * whichever port's own PE header generator defines those (stage0-pe32's
  * x86/Development/pe32hdr.py, for the port this was written against). Only
- * region 0 uses this; every later region is sized by what the operating
- * system actually granted, read back rather than assumed. */
+ * region 0 uses this; every later region starts where the operating system
+ * actually granted it, read back rather than assumed, and runs for the size
+ * that reservation asked for. */
 #define __HEAP_IMAGE_END 0x8400000
 
 #define __BRK_REGION_MAX 64

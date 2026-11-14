@@ -275,8 +275,9 @@ int __fork_getesp()
 	asm("call %__fork_getesp");
 }
 
-/* Where one of the three standard handles lives in the process parameters, so
- * that dup2 can replace it and not merely read it. */
+/* Where one of the three standard handles lives in the process parameters.
+ * __spawn_suspended in process.c reads the three from here to hand them to a
+ * child. */
 int* __stdslot(int n)
 {
 	asm("lea_eax,[esp+DWORD] %4"
@@ -307,8 +308,9 @@ char* __widen(char* s)
 /* A UNICODE_STRING over a DOS path: two words, the first holding Length and
  * MaximumLength as two 16-bit halves, the second the widened text.  Both
  * lengths are in bytes, and MaximumLength counts the terminator that Length
- * does not.  RtlSetCurrentDirectory_U is the one caller that wants a DOS path
- * in this shape rather than the NT path __ntobject produces. */
+ * does not.  RtlSetCurrentDirectory_U and RtlCreateProcessParameters are the
+ * callers that want a DOS path, or a command line, in this shape rather than
+ * the NT path __ntobject produces. */
 int* __dosustring(char* path)
 {
 	int n;

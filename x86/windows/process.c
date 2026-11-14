@@ -1597,7 +1597,7 @@ int __gate_call(int gate, int target_lo, int target_hi, int a1, int a1_hi, int a
 	data[0] = target_lo; data[1] = target_hi;
 	data[2] = a1; data[3] = a1_hi;
 	data[4] = a2; data[5] = a2_hi;
-	data[12] = -572662307;   /* 0xDCDCDCDC: a recognisable poison result, so a
+	data[12] = -572662307;   /* 0xDDDDDDDD: a recognisable poison result, so a
 	                          * gate call that never touches Result reads back
 	                          * as obviously wrong rather than as a plausible
 	                          * STATUS_SUCCESS of 0. */

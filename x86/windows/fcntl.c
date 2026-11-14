@@ -10,9 +10,9 @@
  *
  * The flag values are POSIX's, because the C above this file uses them by
  * name; what reaches ntdll is a DesiredAccess and a CreateDisposition instead,
- * chosen by __open from whether the write bit is set.  mode is accepted and
- * ignored: Windows has no permission bits of that shape, and nothing here
- * would know what to do with them.
+ * chosen by __open from whether flag is anything but O_RDONLY.  mode is
+ * accepted and ignored: Windows has no permission bits of that shape, and
+ * nothing here would know what to do with them.
  */
 
 #ifndef __FCNTL_C
@@ -40,8 +40,8 @@ int __open_handle(char* name, int flag, int mode)
 	    "call %__open");
 }
 
-/* A file that could not be opened comes back from __open as 0, because that is
- * what the handle slot NtCreateFile was given still holds and there is nothing
+/* A file that could not be opened comes back from __open as 0, which is what
+ * open_file in ntdll-i386.hex2 answers for a failure, and there is nothing
  * further down to say it any other way.  Everything above expects the Linux
  * answer instead -- a negative number -- and tests for exactly that: fcntl.c's
  * open() turns a negative into errno and -1, and stdio.c's fopen() gives up on

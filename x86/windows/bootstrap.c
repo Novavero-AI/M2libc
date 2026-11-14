@@ -7,8 +7,8 @@
  *
  * The Windows backend of M2libc's bootstrap C library: what a program compiled
  * by cc_x86 gets before anything of M2libc proper exists.  It stands in for
- * M2libc/x86/linux/bootstrap.c and has the same functions, with the same
- * signatures, so a source that includes one can include the other instead.
+ * M2libc/x86/linux/bootstrap.c and M2libc/bootstrap.c together, with as much
+ * of them as M2-Planet and M1-macro call, under the same signatures.
  *
  * Linux puts a syscall in each of these.  Windows has none a user program may
  * make, so each is a call into x86/libc-core.M1, which is where the argument
