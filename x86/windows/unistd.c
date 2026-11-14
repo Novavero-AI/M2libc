@@ -11,8 +11,8 @@
  * above it -- all of stdio.c, stdlib.c, ctype.c -- compiles unchanged.
  *
  * Linux puts a syscall in each of these.  Each of these is a call into
- * x86/libc-core.M1 instead, which is where the argument pushing and the ntdll
- * entry points live.
+ * x86/windows/libc-core.M1 instead, which is where the argument pushing and
+ * the ntdll entry points live.
  *
  * A file descriptor here is a Windows HANDLE, not a small integer, with 0, 1
  * and 2 reserved to mean stdin, stdout and stderr as C expects; __stdhandle

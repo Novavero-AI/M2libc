@@ -11,10 +11,10 @@
  * of them as M2-Planet and M1-macro call, under the same signatures.
  *
  * Linux puts a syscall in each of these.  Windows has none a user program may
- * make, so each is a call into x86/libc-core.M1, which is where the argument
- * pushing and the PEB reading live.  The two files are meant to be read
- * together; between them they are the whole of the operating system as far as
- * anything compiled here is concerned.
+ * make, so each is a call into x86/windows/libc-core.M1, which is where the
+ * argument pushing and the PEB reading live.  The two files are meant to be
+ * read together; between them they are the whole of the operating system as
+ * far as anything compiled here is concerned.
  *
  * A FILE* is a Windows HANDLE, except for 0, 1 and 2, which mean stdin, stdout
  * and stderr and are looked up in the PEB when used.  No real handle is that

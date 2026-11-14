@@ -84,8 +84,8 @@
  * by: an argument with a space or a quote in it is wrapped in quotes, a quote
  * inside it becomes \", and a backslash run before either becomes twice as
  * long so that the split can tell the two apart.  So an argument survives the
- * round trip whatever is in it -- see next_token in x86/ntdll-i386.hex2 for
- * the other side of the same rule.
+ * round trip whatever is in it -- see next_token in x86/windows/ntdll-i386.hex2
+ * for the other side of the same rule.
  *
  * The child inherits this process's three standard handles, which is what
  * makes redirection work at all, but only those three.
@@ -2020,18 +2020,17 @@ char* __self_path()
  * completion (x86/Development/fork-test.c and friends) -- not merely
  * fault-free -- and that measurement is what earned it fork()'s whole job.
  *
- * There used to be a fallback here: start this same program again and
- * overwrite the copy, the way Cygwin has always done it, working only
- * because this bootstrap's images sit at one fixed, unrelocated address in
- * every process (x86/PE32-i386.hex2 sets IMAGE_FILE_RELOCS_STRIPPED and no
+ * There used to be a fallback here: start this same program again and overwrite
+ * the copy, the way Cygwin has always done it, working only because this
+ * bootstrap's images sit at one fixed, unrelocated address in every process
+ * (x86/windows/PE32-i386.hex2 sets IMAGE_FILE_RELOCS_STRIPPED and no
  * DYNAMIC_BASE) -- so a pointer meant the same thing in both copies with no
- * fixups needed. It is gone, not merely unused: it was also the only thing
- * that made fork() work on Wine, where RtlCloneUserProcess is not exported
- * at all and __clone_process_wow64fix's first check fails before anything
- * else runs. A caller on Wine gets -1 from
- * fork() now. That is a real loss of what used to work there, traded
- * deliberately for one path instead of two to reason about everywhere
- * else -- not an oversight, and recoverable from git history if Wine
+ * fixups needed. It is gone, not merely unused: it was also the only thing that
+ * made fork() work on Wine, where RtlCloneUserProcess is not exported at all
+ * and __clone_process_wow64fix's first check fails before anything else runs. A
+ * caller on Wine gets -1 from fork() now. That is a real loss of what used to
+ * work there, traded deliberately for one path instead of two to reason about
+ * everywhere else -- not an oversight, and recoverable from git history if Wine
  * support is ever worth the second path again. */
 int fork()
 {
