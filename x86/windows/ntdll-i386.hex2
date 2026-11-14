@@ -1,0 +1,719 @@
+# SPDX-FileCopyrightText: (C) 2026 Gavin John
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Additional permission under GNU GPL version 3 section 7:
+# see LICENSE.EXCEPTION in the root of this project.
+#
+# ntdll-i386.hex2: what every program above catm needs from Windows.
+#
+# There is no syscall a user program may make directly here, so each of these
+# programs has to find ntdll through the PEB, resolve what it needs out of the
+# export table by name, and turn a DOS path into the NT path NtCreateFile wants.
+# That cost is the same in every program, so from M0 upward it lives in this file
+# and catm puts it in front of the program:
+#
+#   catm prog.hex2 PE32-i386.hex2 ntdll-i386.hex2 body.hex2
+#
+# hex0, hex1, hex2 and catm cannot use it -- there is no catm below catm to join
+# files with -- so they carry their own copies.
+#
+#   resolve_all()   fill in every fn_ slot; call it first
+#   open_argv()     argv[1] for reading, argv[2] for writing
+#   fgetc()         the next input byte, or -4 at end of file
+#   fputc(al)       one byte to the output
+#   exit_ok()       close both files and exit 0
+#
+# The image imports nothing, so there is no import table to inspect and nothing
+# between these programs and the kernel.
+
+## ==== .text : one line per instruction ====
+
+# find_ntdll() -> ntdll base address.
+# TEB (fs:0x30) -> PEB -> Ldr -> InMemoryOrderModuleList.  The first entry in
+# that list is the main EXE and the second is ntdll, by loader convention.
+:find_ntdll
+	64 A1 30 00 00 00           ; mov eax, [fs:0x30]          # eax = PEB (TEB->PEB at fs:0x30 on x86)
+	8B 40 0C                    ; mov eax, [eax + 0x0c]       # eax = PEB->Ldr (PEB_LDR_DATA*)
+	8B 40 14                    ; mov eax, [eax + 0x14]       # eax = Ldr->InMemoryOrderModuleList.Flink
+	8B 00                       ; mov eax, [eax]              # -> 2nd entry: ntdll, by loader convention
+	8B 40 10                    ; mov eax, [eax + 0x10]
+	C3                          ; ret
+
+# resolve_export(module_base, name) -> address, or 0 if not found.
+# stdcall: arguments pushed right to left, callee cleans the stack.  Reads
+# e_lfanew to reach the PE header, then walks the export directory: a name match
+# gives an index, that index gives an ordinal, that ordinal gives an address.
+:resolve_export
+	53                          ; push ebx
+	56                          ; push esi
+	57                          ; push edi
+	55                          ; push ebp
+	89 E5                       ; mov ebp, esp
+	8B 5D 14                    ; mov ebx, [ebp + 20]         # module_base
+	8B 43 3C                    ; mov eax, [ebx + 0x3c]       # e_lfanew
+	01 D8                       ; add eax, ebx                # PE header
+	8B 40 78                    ; mov eax, [eax + 0x78]       # DataDirectory[0].VirtualAddress
+	01 D8                       ; add eax, ebx                # IMAGE_EXPORT_DIRECTORY*
+	8B 70 20                    ; mov esi, [eax + 0x20]       # AddressOfNames RVA
+	01 DE                       ; add esi, ebx
+	8B 78 24                    ; mov edi, [eax + 0x24]       # AddressOfNameOrdinals RVA
+	01 DF                       ; add edi, ebx
+	FF 70 1C                    ; push dword [eax + 0x1c]     # AddressOfFunctions RVA (stash)
+	59                          ; pop ecx
+	01 D9                       ; add ecx, ebx                # ecx = AddressOfFunctions (abs)
+	8B 40 18                    ; mov eax, [eax + 0x18]       # NumberOfNames
+	50                          ; push eax                    # loop bound
+	31 C0                       ; xor eax, eax                # eax = index i = 0
+	3B 04 24                    ; cmp eax, [esp]
+	7D 2D                       ; jge .not_found
+	51                          ; push ecx                    # save AddressOfFunctions
+	8B 0C 86                    ; mov ecx, [esi + eax*4]      # Names[i] RVA
+	01 D9                       ; add ecx, ebx                # -> absolute candidate name ptr
+	50                          ; push eax                    # save loop index
+	52                          ; push edx                    # save target-name ptr
+	8B 55 18                    ; mov edx, [ebp + 24]         # reload target name ptr fresh
+	8A 01                       ; mov al, [ecx]               # AL as scratch, not DL: dl is edx's
+	3A 02                       ; cmp al, [edx]
+	75 08                       ; jne .no_match
+	84 C0                       ; test al, al
+	74 0A                       ; je .found
+	41                          ; inc ecx
+	42                          ; inc edx
+	EB F2                       ; jmp .cmp_chars
+	5A                          ; pop edx
+	58                          ; pop eax                     # restore loop index
+	59                          ; pop ecx
+	40                          ; inc eax
+	EB DC                       ; jmp .scan_loop
+	5A                          ; pop edx
+	58                          ; pop eax                     # restore loop index
+	59                          ; pop ecx                     # ecx = AddressOfFunctions (abs)
+	0F B7 14 47                 ; movzx edx, word [edi + eax*2] # NameOrdinals[i]
+	8B 04 91                    ; mov eax, [ecx + edx*4]      # Functions[ordinal] RVA
+	01 D8                       ; add eax, ebx                # -> absolute address
+	EB 02                       ; jmp .cleanup
+	31 C0                       ; xor eax, eax
+	59                          ; pop ecx                     # drop the loop-bound we pushed
+	5D                          ; pop ebp
+	5F                          ; pop edi
+	5E                          ; pop esi
+	5B                          ; pop ebx
+	C2 08 00                    ; ret 8                       # stdcall, callee-clean, 2 args
+
+# next_token() -> eax = the next argument, or 0 when exhausted.
+# esi is the cursor into the command line.  Characters are UTF-16, so it advances
+# two bytes at a time, and the terminator is overwritten with a NUL in place.  A
+# separator is space or tab; see emit_next_token's own docstring for why tab
+# matters here.
+:next_token
+
+:.skip
+	66 83 3E 20                 ; cmp word [esi], ' '
+	0F 84 %.skip_adv            ; je .skip_adv
+	66 83 3E 09                 ; cmp word [esi], TAB
+	0F 85 %.tok_start           ; jne .tok_start
+
+:.skip_adv
+	83 C6 02                    ; add esi, 2
+	E9 %.skip                   ; jmp .skip
+
+:.tok_start
+	66 83 3E 00                 ; cmp word [esi], 0
+	0F 84 %.none                ; je .none                    # end of command line
+	53                          ; push ebx                    # the caller's, and needed here
+	51                          ; push ecx
+	89 F2                       ; mov edx, esi                # the write cursor starts where the token does
+	52                          ; push edx                    # and that is what gets returned
+	31 C9                       ; xor ecx, ecx                # not inside quotes yet
+
+:.scan
+	66 8B 06                    ; mov ax, [esi]
+	66 85 C0                    ; test ax, ax
+	0F 84 %.done                ; je .done                    # the end of the command line ends the token
+	85 C9                       ; test ecx, ecx
+	0F 85 %.quoting             ; jne .quoting                # inside quotes, whitespace is text
+	66 83 F8 20                 ; cmp ax, ' '
+	0F 84 %.cut                 ; je .cut
+	66 83 F8 09                 ; cmp ax, TAB
+	0F 84 %.cut                 ; je .cut
+
+:.quoting
+	66 83 F8 5C                 ; cmp ax, '\'
+	0F 84 %.backslash           ; je .backslash
+	66 83 F8 22                 ; cmp ax, '"'
+	0F 84 %.quote               ; je .quote
+	66 89 02                    ; mov [edx], ax               # an ordinary character, kept
+	83 C2 02                    ; add edx, 2
+	83 C6 02                    ; add esi, 2
+	E9 %.scan                   ; jmp .scan
+
+:.quote
+	83 F1 01                    ; xor ecx, 1                  # a quote with no backslashes before it only opens or closes
+	83 C6 02                    ; add esi, 2
+	E9 %.scan                   ; jmp .scan
+
+:.backslash
+	31 DB                       ; xor ebx, ebx                # count the whole run before deciding what it means
+
+:.bs_count
+	66 83 3E 5C                 ; cmp word [esi], '\'
+	0F 85 %.bs_end              ; jne .bs_end
+	43                          ; inc ebx
+	83 C6 02                    ; add esi, 2
+	E9 %.bs_count               ; jmp .bs_count
+
+:.bs_end
+	66 83 3E 22                 ; cmp word [esi], '"'
+	0F 84 %.bs_quote            ; je .bs_quote
+
+:.bs_plain
+	85 DB                       ; test ebx, ebx               # not before a quote: every one of them is itself
+	0F 84 %.scan                ; je .scan
+	66 C7 02 5C 00              ; mov word [edx], '\'
+	83 C2 02                    ; add edx, 2
+	4B                          ; dec ebx
+	E9 %.bs_plain               ; jmp .bs_plain
+
+:.bs_quote
+	89 D8                       ; mov eax, ebx                # before a quote: half of them survive
+	83 E0 01                    ; and eax, 1                  # and an odd one makes the quote a literal
+	D1 EB                       ; shr ebx, 1
+
+:.bsq_emit
+	85 DB                       ; test ebx, ebx
+	0F 84 %.bsq_end             ; je .bsq_end
+	66 C7 02 5C 00              ; mov word [edx], '\'
+	83 C2 02                    ; add edx, 2
+	4B                          ; dec ebx
+	E9 %.bsq_emit               ; jmp .bsq_emit
+
+:.bsq_end
+	85 C0                       ; test eax, eax
+	0F 84 %.scan                ; je .scan                    # an even run leaves the quote to open or close
+	66 C7 02 22 00              ; mov word [edx], '"'         # an odd one leaves a quote in the text
+	83 C2 02                    ; add edx, 2
+	83 C6 02                    ; add esi, 2                  # and consumes it
+	E9 %.scan                   ; jmp .scan
+
+:.cut
+	83 C6 02                    ; add esi, 2                  # step past the separator, for the next call
+
+:.done
+	66 C7 02 00 00              ; mov word [edx], 0           # terminate what was written, which is at or before what was read
+	58                          ; pop eax                     # the token
+	59                          ; pop ecx
+	5B                          ; pop ebx
+	C3                          ; ret
+
+:.none
+	31 C0                       ; xor eax, eax                # no token
+	C3                          ; ret
+
+# open_file(eax = path, ecx = DesiredAccess, edx = CreateDisposition)
+# -> handle, or 0 if the file could not be opened.
+# RtlDosPathNameToNtPathName_U turns the DOS path into the NT path NtCreateFile
+# needs, resolving a relative path against the working directory.
+# FILE_SYNCHRONOUS_IO_NONALERT keeps the file position in the I/O manager, which
+# is why every read and write passes a NULL ByteOffset and still advances.
+# The path is UTF-16, which is the only kind ntdll takes.
+# It shares the file every way, as a POSIX open is never refused for another
+# process having the file open: GNU Mes keeps each file it writes open until
+# it exits, and MesCC runs M1 on the assembly it has just written.
+:open_file
+	89 0D &g_access             ; mov [g_access], ecx         # stash DesiredAccess
+	89 15 &g_disp               ; mov [g_disp], edx           # stash CreateDisposition
+	6A 00                       ; push 0x0                    # DirectoryInfo
+	6A 00                       ; push 0x0                    # NtFileNamePart
+	68 &nt_path                 ; push nt_path                # NtPathName (UNICODE_STRING, ntdll allocates the buffer)
+	50                          ; push eax                    # DosPathName
+	FF 15 &fn_rtlpath           ; call [fn_rtlpath]           # resolves a relative path against the working directory
+	C7 05 &oa 18 00 00 00       ; mov dword [oa], 0x18        # OBJECT_ATTRIBUTES.Length = 24 (x86 sizeof)
+	C7 05 &oa_root 00 00 00 00  ; mov dword [oa+4], 0x0       # OBJECT_ATTRIBUTES.RootDirectory = NULL
+	C7 05 &oa_name &nt_path     ; mov dword [oa+8], nt_path   # OBJECT_ATTRIBUTES.ObjectName = &nt_path
+	C7 05 &oa_attr 42 00 00 00  ; mov dword [oa+12], 0x42     # OBJECT_ATTRIBUTES.Attributes = OBJ_CASE_INSENSITIVE|OBJ_INHERIT
+	C7 05 &oa_sd 00 00 00 00    ; mov dword [oa+16], 0x0      # OBJECT_ATTRIBUTES.SecurityDescriptor = NULL
+	C7 05 &oa_sqos 00 00 00 00  ; mov dword [oa+20], 0x0      # OBJECT_ATTRIBUTES.SecurityQualityOfService = NULL
+	6A 00                       ; push 0x0                    # EaLength
+	6A 00                       ; push 0x0                    # EaBuffer
+	6A 60                       ; push 0x60                   # CreateOptions = FILE_SYNCHRONOUS_IO_NONALERT|FILE_NON_DIRECTORY_FILE
+	FF 35 &g_disp               ; push dword [g_disp]         # CreateDisposition
+	6A 07                       ; push 0x7                    # ShareAccess = FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE
+	68 80 00 00 00              ; push 0x80                   # FileAttributes = FILE_ATTRIBUTE_NORMAL (imm32: 6A 80 would sign-extend)
+	6A 00                       ; push 0x0                    # AllocationSize = NULL
+	68 &iosb                    ; push iosb                   # IoStatusBlock
+	68 &oa                      ; push oa                     # ObjectAttributes
+	FF 35 &g_access             ; push dword [g_access]       # DesiredAccess
+	68 &g_handle                ; push g_handle               # FileHandle (out)
+	FF 15 &fn_table             ; call [fn_create]
+	85 C0                       ; test eax, eax               # NTSTATUS < 0 is a failure to open
+	0F 88 %open_file.fail       ; js open_file.fail
+	A1 &g_handle                ; mov eax, [g_handle]
+	C3                          ; ret
+
+:open_file.fail
+	31 C0                       ; xor eax, eax                # 0, which is what fopen in C tests for
+	C3                          ; ret
+
+# fgetc() -> eax = the next byte of the input, or -4 at end of file.
+# -4 rather than -1 because that is what upstream's fgetc returns and what its
+# callers compare against.  Every register but eax comes back untouched, which is
+# what upstream's callers assume of it.
+:fgetc
+	53                          ; push ebx                    # an ntdll call keeps ebx, esi, edi and ebp, but not ecx or edx
+	51                          ; push ecx
+	52                          ; push edx
+	6A 00                       ; push 0x0                    # Key
+	6A 00                       ; push 0x0                    # ByteOffset = NULL: FILE_SYNCHRONOUS_IO_NONALERT keeps the file position
+	6A 01                       ; push 0x1                    # Length = 1
+	68 &inbuf                   ; push inbuf                  # Buffer
+	68 &iosb                    ; push iosb                   # IoStatusBlock
+	6A 00                       ; push 0x0                    # ApcContext
+	6A 00                       ; push 0x0                    # ApcRoutine
+	6A 00                       ; push 0x0                    # Event
+	FF 35 &in_handle            ; push dword [in_handle]      # FileHandle
+	FF 15 &fn_read              ; call [fn_read]
+	85 C0                       ; test eax, eax               # NTSTATUS < 0 (STATUS_END_OF_FILE) is the end
+	0F 88 %fgetc.eof            ; js fgetc.eof
+	0F B6 05 &inbuf             ; movzx eax, byte [inbuf]
+	E9 %fgetc.done              ; jmp fgetc.done
+
+:fgetc.eof
+	B8 FC FF FF FF              ; mov eax, -0x4               # mov eax, -4  -- EOF, as upstream reports it
+
+:fgetc.done
+	5A                          ; pop edx
+	59                          ; pop ecx
+	5B                          ; pop ebx
+	C3                          ; ret
+
+# fputc(al = byte): one write per byte, as upstream does it.  Every
+# register comes back untouched, eax included, so a caller may write the same byte
+# twice without reloading it.
+:fputc
+	50                          ; push eax                    # the byte written comes back in eax, as upstream's fputc leaves it
+	53                          ; push ebx
+	51                          ; push ecx
+	52                          ; push edx
+	A2 &outbuf                  ; mov [outbuf], al
+	6A 00                       ; push 0x0                    # Key
+	6A 00                       ; push 0x0                    # ByteOffset
+	6A 01                       ; push 0x1                    # Length = 1
+	68 &outbuf                  ; push outbuf                 # Buffer
+	68 &iosb                    ; push iosb                   # IoStatusBlock
+	6A 00                       ; push 0x0                    # ApcContext
+	6A 00                       ; push 0x0                    # ApcRoutine
+	6A 00                       ; push 0x0                    # Event
+	FF 35 &out_handle           ; push dword [out_handle]     # FileHandle
+	FF 15 &fn_write             ; call [fn_write]
+	5A                          ; pop edx
+	59                          ; pop ecx
+	5B                          ; pop ebx
+	58                          ; pop eax
+	C3                          ; ret
+
+# resolve_all(): fill in every fn_ slot.  Call this before anything else;
+# nothing below works until it has run.
+:resolve_all
+	E8 %find_ntdll              ; call find_ntdll
+	89 C3                       ; mov ebx, eax                # ntdll base, held across every resolve_export call
+	68 &name_NtCreateFile       ; push name_NtCreateFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_table                ; mov [fn_create], eax
+	68 &name_NtReadFile         ; push name_NtReadFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_read                 ; mov [fn_read], eax
+	68 &name_NtWriteFile        ; push name_NtWriteFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_write                ; mov [fn_write], eax
+	68 &name_NtClose            ; push name_NtClose
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_close                ; mov [fn_close], eax
+	68 &name_NtTerminateProcess ; push name_NtTerminateProcess
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_exit                 ; mov [fn_exit], eax
+	68 &name_RtlDosPathNameToNtPathName_U ; push name_RtlDosPathNameToNtPathName_U
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_rtlpath              ; mov [fn_rtlpath], eax
+	68 &name_NtSetInformationFile ; push name_NtSetInformationFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_setinfo              ; mov [fn_setinfo], eax
+	68 &name_NtQueryInformationFile ; push name_NtQueryInformationFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_queryinfo            ; mov [fn_queryinfo], eax
+	68 &name_NtQueryAttributesFile ; push name_NtQueryAttributesFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_queryattr            ; mov [fn_queryattr], eax
+	68 &name_NtQueryFullAttributesFile ; push name_NtQueryFullAttributesFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_queryfull            ; mov [fn_queryfull], eax
+	68 &name_RtlSetCurrentDirectory_U ; push name_RtlSetCurrentDirectory_U
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_setcwd               ; mov [fn_setcwd], eax
+	68 &name_RtlGetCurrentDirectory_U ; push name_RtlGetCurrentDirectory_U
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_getcwd               ; mov [fn_getcwd], eax
+	68 &name_NtDuplicateObject  ; push name_NtDuplicateObject
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_dup                  ; mov [fn_dup], eax
+	68 &name_NtQuerySystemTime  ; push name_NtQuerySystemTime
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_time                 ; mov [fn_time], eax
+	68 &name_NtQueryVolumeInformationFile ; push name_NtQueryVolumeInformationFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_queryvol             ; mov [fn_queryvol], eax
+	68 &name_NtWaitForSingleObject ; push name_NtWaitForSingleObject
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_wait                 ; mov [fn_wait], eax
+	68 &name_NtQueryInformationProcess ; push name_NtQueryInformationProcess
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_queryproc            ; mov [fn_queryproc], eax
+	68 &name_NtDeleteFile       ; push name_NtDeleteFile
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_delete               ; mov [fn_delete], eax
+	68 &name_RtlGetVersion      ; push name_RtlGetVersion
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_version              ; mov [fn_version], eax
+	68 &name_RtlCreateProcessParameters ; push name_RtlCreateProcessParameters
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_makeparams           ; mov [fn_makeparams], eax
+	68 &name_RtlCreateUserProcess ; push name_RtlCreateUserProcess
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_createproc           ; mov [fn_createproc], eax
+	68 &name_NtResumeThread     ; push name_NtResumeThread
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_resume               ; mov [fn_resume], eax
+	68 &name_NtAllocateVirtualMemory ; push name_NtAllocateVirtualMemory
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_alloc                ; mov [fn_alloc], eax
+	68 &name_RtlCloneUserProcess ; push name_RtlCloneUserProcess
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_clone                ; mov [fn_clone], eax
+	68 &name_NtGetContextThread ; push name_NtGetContextThread
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_getcontext           ; mov [fn_getcontext], eax
+	68 &name_NtSetContextThread ; push name_NtSetContextThread
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_setcontext           ; mov [fn_setcontext], eax
+	68 &name_NtWriteVirtualMemory ; push name_NtWriteVirtualMemory
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_writevm              ; mov [fn_writevm], eax
+	68 &name_NtReadVirtualMemory ; push name_NtReadVirtualMemory
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_readvm               ; mov [fn_readvm], eax
+	68 &name_NtSuspendThread    ; push name_NtSuspendThread
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_suspend              ; mov [fn_suspend], eax
+	68 &name_NtWow64QueryInformationProcess64 ; push name_NtWow64QueryInformationProcess64
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_wow64qinfo           ; mov [fn_wow64qinfo], eax
+	68 &name_NtWow64ReadVirtualMemory64 ; push name_NtWow64ReadVirtualMemory64
+	53                          ; push ebx                    # module_base
+	E8 %resolve_export          ; call resolve_export
+	A3 &fn_wow64readvm          ; mov [fn_wow64readvm], eax
+	C3                          ; ret
+
+# open_argv(): argv[1] opened for reading, argv[2] created or truncated for
+# writing.  Every program in this chain takes exactly those two arguments.
+:open_argv
+	64 A1 30 00 00 00           ; mov eax, [fs:0x30]          # PEB
+	8B 40 10                    ; mov eax, [eax+0x10]         # PEB->ProcessParameters
+	8B 70 44                    ; mov esi, [eax+0x44]         # CommandLine.Buffer (UNICODE_STRING at 0x40, Buffer at +4)
+	E8 %next_token              ; call next_token             # argv[0]: the program name, discarded
+	E8 %next_token              ; call next_token             # argv[1]: the input path
+	B9 00 00 10 80              ; mov ecx, 0x80100000         # GENERIC_READ|SYNCHRONIZE
+	BA 01 00 00 00              ; mov edx, 0x1                # FILE_OPEN
+	E8 %open_file               ; call open_file
+	A3 &in_handle               ; mov [in_handle], eax
+	E8 %next_token              ; call next_token             # argv[2]: the output path
+	B9 00 00 10 40              ; mov ecx, 0x40100000         # GENERIC_WRITE|SYNCHRONIZE
+	BA 05 00 00 00              ; mov edx, 0x5                # FILE_OVERWRITE_IF
+	E8 %open_file               ; call open_file
+	A3 &out_handle              ; mov [out_handle], eax
+	C3                          ; ret
+
+# exit_ok(): close both files and exit 0.  Does not return.
+:exit_ok
+	FF 35 &out_handle           ; push dword [out_handle]     # push out_handle
+	FF 15 &fn_close             ; call [fn_close]
+	FF 35 &in_handle            ; push dword [in_handle]      # push in_handle
+	FF 15 &fn_close             ; call [fn_close]
+	6A 00                       ; push 0x0                    # ExitStatus = 0
+	6A FF                       ; push -0x1                   # ProcessHandle = NtCurrentProcess pseudo-handle
+	FF 15 &fn_exit              ; call [fn_exit]
+
+## ==== .data ====
+
+# Export names, matched by resolve_export.
+:name_NtCreateFile
+4E 74 43 72 65 61 74 65 46 69 6C 65 00 # name_NtCreateFile = "NtCreateFile"
+
+:name_NtReadFile
+4E 74 52 65 61 64 46 69 6C 65 00 # name_NtReadFile = "NtReadFile"
+
+:name_NtWriteFile
+4E 74 57 72 69 74 65 46 69 6C 65 00 # name_NtWriteFile = "NtWriteFile"
+
+:name_NtClose
+4E 74 43 6C 6F 73 65 00         # name_NtClose = "NtClose"
+
+:name_NtTerminateProcess
+4E 74 54 65 72 6D 69 6E 61 74 65 50 72 6F 63 65 73 73 00 # name_NtTerminateProcess = "NtTerminateProcess"
+
+:name_RtlDosPathNameToNtPathName_U
+52 74 6C 44 6F 73 50 61 74 68 4E 61 6D 65 54 6F 4E 74 50 61 74 68 4E 61 6D 65 5F 55 00 # name_RtlDosPathNameToNtPathName_U = "RtlDosPathNameToNtPathName_U"
+
+:name_NtSetInformationFile
+4E 74 53 65 74 49 6E 66 6F 72 6D 61 74 69 6F 6E 46 69 6C 65 00 # name_NtSetInformationFile = "NtSetInformationFile"
+
+:name_NtQueryInformationFile
+4E 74 51 75 65 72 79 49 6E 66 6F 72 6D 61 74 69 6F 6E 46 69 6C 65 00 # name_NtQueryInformationFile = "NtQueryInformationFile"
+
+:name_NtQueryAttributesFile
+4E 74 51 75 65 72 79 41 74 74 72 69 62 75 74 65 73 46 69 6C 65 00 # name_NtQueryAttributesFile = "NtQueryAttributesFile"
+
+:name_NtQueryFullAttributesFile
+4E 74 51 75 65 72 79 46 75 6C 6C 41 74 74 72 69 62 75 74 65 73 46 69 6C 65 00 # name_NtQueryFullAttributesFile = "NtQueryFullAttributesFile"
+
+:name_RtlSetCurrentDirectory_U
+52 74 6C 53 65 74 43 75 72 72 65 6E 74 44 69 72 65 63 74 6F 72 79 5F 55 00 # name_RtlSetCurrentDirectory_U = "RtlSetCurrentDirectory_U"
+
+:name_RtlGetCurrentDirectory_U
+52 74 6C 47 65 74 43 75 72 72 65 6E 74 44 69 72 65 63 74 6F 72 79 5F 55 00 # name_RtlGetCurrentDirectory_U = "RtlGetCurrentDirectory_U"
+
+:name_NtDuplicateObject
+4E 74 44 75 70 6C 69 63 61 74 65 4F 62 6A 65 63 74 00 # name_NtDuplicateObject = "NtDuplicateObject"
+
+:name_NtQuerySystemTime
+4E 74 51 75 65 72 79 53 79 73 74 65 6D 54 69 6D 65 00 # name_NtQuerySystemTime = "NtQuerySystemTime"
+
+:name_NtQueryVolumeInformationFile
+4E 74 51 75 65 72 79 56 6F 6C 75 6D 65 49 6E 66 6F 72 6D 61 74 69 6F 6E 46 69 6C 65 00 # name_NtQueryVolumeInformationFile = "NtQueryVolumeInformationFile"
+
+:name_NtWaitForSingleObject
+4E 74 57 61 69 74 46 6F 72 53 69 6E 67 6C 65 4F 62 6A 65 63 74 00 # name_NtWaitForSingleObject = "NtWaitForSingleObject"
+
+:name_NtQueryInformationProcess
+4E 74 51 75 65 72 79 49 6E 66 6F 72 6D 61 74 69 6F 6E 50 72 6F 63 65 73 73 00 # name_NtQueryInformationProcess = "NtQueryInformationProcess"
+
+:name_NtDeleteFile
+4E 74 44 65 6C 65 74 65 46 69 6C 65 00 # name_NtDeleteFile = "NtDeleteFile"
+
+:name_RtlGetVersion
+52 74 6C 47 65 74 56 65 72 73 69 6F 6E 00 # name_RtlGetVersion = "RtlGetVersion"
+
+:name_RtlCreateProcessParameters
+52 74 6C 43 72 65 61 74 65 50 72 6F 63 65 73 73 50 61 72 61 6D 65 74 65 72 73 00 # name_RtlCreateProcessParameters = "RtlCreateProcessParameters"
+
+:name_RtlCreateUserProcess
+52 74 6C 43 72 65 61 74 65 55 73 65 72 50 72 6F 63 65 73 73 00 # name_RtlCreateUserProcess = "RtlCreateUserProcess"
+
+:name_NtResumeThread
+4E 74 52 65 73 75 6D 65 54 68 72 65 61 64 00 # name_NtResumeThread = "NtResumeThread"
+
+:name_NtAllocateVirtualMemory
+4E 74 41 6C 6C 6F 63 61 74 65 56 69 72 74 75 61 6C 4D 65 6D 6F 72 79 00 # name_NtAllocateVirtualMemory = "NtAllocateVirtualMemory"
+
+:name_RtlCloneUserProcess
+52 74 6C 43 6C 6F 6E 65 55 73 65 72 50 72 6F 63 65 73 73 00 # name_RtlCloneUserProcess = "RtlCloneUserProcess"
+
+:name_NtGetContextThread
+4E 74 47 65 74 43 6F 6E 74 65 78 74 54 68 72 65 61 64 00 # name_NtGetContextThread = "NtGetContextThread"
+
+:name_NtSetContextThread
+4E 74 53 65 74 43 6F 6E 74 65 78 74 54 68 72 65 61 64 00 # name_NtSetContextThread = "NtSetContextThread"
+
+:name_NtWriteVirtualMemory
+4E 74 57 72 69 74 65 56 69 72 74 75 61 6C 4D 65 6D 6F 72 79 00 # name_NtWriteVirtualMemory = "NtWriteVirtualMemory"
+
+:name_NtReadVirtualMemory
+4E 74 52 65 61 64 56 69 72 74 75 61 6C 4D 65 6D 6F 72 79 00 # name_NtReadVirtualMemory = "NtReadVirtualMemory"
+
+:name_NtSuspendThread
+4E 74 53 75 73 70 65 6E 64 54 68 72 65 61 64 00 # name_NtSuspendThread = "NtSuspendThread"
+
+:name_NtWow64QueryInformationProcess64
+4E 74 57 6F 77 36 34 51 75 65 72 79 49 6E 66 6F 72 6D 61 74 69 6F 6E 50 72 6F 63 65 73 73 36 34 00 # name_NtWow64QueryInformationProcess64 = "NtWow64QueryInformationProcess64"
+
+:name_NtWow64ReadVirtualMemory64
+4E 74 57 6F 77 36 34 52 65 61 64 56 69 72 74 75 61 6C 4D 65 6D 6F 72 79 36 34 00 # name_NtWow64ReadVirtualMemory64 = "NtWow64ReadVirtualMemory64"
+
+:fn_table
+
+# Resolved routine addresses.  Kept in memory because they will not fit in registers.
+:fn_create
+00 00 00 00                     # fn_create: slot 0, resolved NtCreateFile -- open a file, or make one
+
+:fn_read
+00 00 00 00                     # fn_read: slot 1, resolved NtReadFile -- read
+
+:fn_write
+00 00 00 00                     # fn_write: slot 2, resolved NtWriteFile -- write
+
+:fn_close
+00 00 00 00                     # fn_close: slot 3, resolved NtClose -- close, and any other handle
+
+:fn_exit
+00 00 00 00                     # fn_exit: slot 4, resolved NtTerminateProcess -- _exit
+
+:fn_rtlpath
+00 00 00 00                     # fn_rtlpath: slot 5, resolved RtlDosPathNameToNtPathName_U -- a DOS path becomes an NT path
+
+:fn_setinfo
+00 00 00 00                     # fn_setinfo: slot 6, resolved NtSetInformationFile -- lseek
+
+:fn_queryinfo
+00 00 00 00                     # fn_queryinfo: slot 7, resolved NtQueryInformationFile -- lseek
+
+:fn_queryattr
+00 00 00 00                     # fn_queryattr: slot 8, resolved NtQueryAttributesFile -- access
+
+:fn_queryfull
+00 00 00 00                     # fn_queryfull: slot 9, resolved NtQueryFullAttributesFile -- unused
+
+:fn_setcwd
+00 00 00 00                     # fn_setcwd: slot 10, resolved RtlSetCurrentDirectory_U -- chdir
+
+:fn_getcwd
+00 00 00 00                     # fn_getcwd: slot 11, resolved RtlGetCurrentDirectory_U -- getcwd
+
+:fn_dup
+00 00 00 00                     # fn_dup: slot 12, resolved NtDuplicateObject -- __spawn and fork
+
+:fn_time
+00 00 00 00                     # fn_time: slot 13, resolved NtQuerySystemTime -- unused
+
+:fn_queryvol
+00 00 00 00                     # fn_queryvol: slot 14, resolved NtQueryVolumeInformationFile -- unused
+
+:fn_wait
+00 00 00 00                     # fn_wait: slot 15, resolved NtWaitForSingleObject -- waitpid
+
+:fn_queryproc
+00 00 00 00                     # fn_queryproc: slot 16, resolved NtQueryInformationProcess -- waitpid, for the exit status
+
+:fn_delete
+00 00 00 00                     # fn_delete: slot 17, resolved NtDeleteFile -- unlink, and chmod
+
+:fn_version
+00 00 00 00                     # fn_version: slot 18, resolved RtlGetVersion -- uname
+
+:fn_makeparams
+00 00 00 00                     # fn_makeparams: slot 19, resolved RtlCreateProcessParameters -- __spawn, for the child's parameter block
+
+:fn_createproc
+00 00 00 00                     # fn_createproc: slot 20, resolved RtlCreateUserProcess -- __spawn
+
+:fn_resume
+00 00 00 00                     # fn_resume: slot 21, resolved NtResumeThread -- __spawn: a new process starts suspended
+
+:fn_alloc
+00 00 00 00                     # fn_alloc: slot 22, resolved NtAllocateVirtualMemory -- malloc past the image, and fork's gate
+
+:fn_clone
+00 00 00 00                     # fn_clone: slot 23, resolved RtlCloneUserProcess -- fork; absent on wine, where the slot stays 0
+
+:fn_getcontext
+00 00 00 00                     # fn_getcontext: slot 24, resolved NtGetContextThread -- fork: the context a suspended child would start with
+
+:fn_setcontext
+00 00 00 00                     # fn_setcontext: slot 25, resolved NtSetContextThread -- fork: tell that child it is the child
+
+:fn_writevm
+00 00 00 00                     # fn_writevm: slot 26, resolved NtWriteVirtualMemory -- fork: clear a lock in that child's ntdll
+
+:fn_readvm
+00 00 00 00                     # fn_readvm: slot 27, resolved NtReadVirtualMemory -- unused
+
+:fn_suspend
+00 00 00 00                     # fn_suspend: slot 28, resolved NtSuspendThread -- unused
+
+:fn_wow64qinfo
+00 00 00 00                     # fn_wow64qinfo: slot 29, resolved NtWow64QueryInformationProcess64 -- wow64 clone fix: this process's own 64-bit PEB address
+
+:fn_wow64readvm
+00 00 00 00                     # fn_wow64readvm: slot 30, resolved NtWow64ReadVirtualMemory64 -- wow64 clone fix: read the 64-bit ntdll/wow64cpu images to resolve BTCpuSimulate
+
+# Arguments that must survive the RtlDosPathNameToNtPathName_U call.
+:g_access
+00 00 00 00                     # g_access: DesiredAccess held across the RtlDosPathNameToNtPathName_U call
+
+:g_disp
+00 00 00 00                     # g_disp: CreateDisposition, same
+
+:g_handle
+00 00 00 00                     # g_handle: NtCreateFile's out-parameter
+
+# OBJECT_ATTRIBUTES, one label per field so hex2 can address each of them.
+:oa
+00 00 00 00                     # oa: OBJECT_ATTRIBUTES.Length
+
+:oa_root
+00 00 00 00                     # oa_root: .RootDirectory
+
+:oa_name
+00 00 00 00                     # oa_name: .ObjectName
+
+:oa_attr
+00 00 00 00                     # oa_attr: .Attributes
+
+:oa_sd
+00 00 00 00                     # oa_sd: .SecurityDescriptor
+
+:oa_sqos
+00 00 00 00                     # oa_sqos: .SecurityQualityOfService
+
+:nt_path
+00 00 00 00 00 00 00 00         # nt_path: UNICODE_STRING filled by RtlDosPathNameToNtPathName_U
+
+# IO_STATUS_BLOCK.  Information is the byte count of a read.
+:iosb
+00 00 00 00                     # iosb: IO_STATUS_BLOCK.Status
+
+:iosb_info
+00 00 00 00                     # iosb_info: IO_STATUS_BLOCK.Information
+
+# The two open files.
+:in_handle
+00 00 00 00                     # in_handle: argv[1]
+
+:out_handle
+00 00 00 00                     # out_handle: argv[2]
+
+# One-byte read and write buffers.
+:inbuf
+00                              # inbuf: one-byte read buffer
+
+:outbuf
+00                              # outbuf: one-byte write buffer
+
+:__shared_end
