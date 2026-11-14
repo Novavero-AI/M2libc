@@ -56,8 +56,8 @@ void* __ntdll(int slot)
 	    "call %__ntdll");
 }
 
-/* This thread's TEB, which is the only way to reach StackBase and StackLimit
- * -- the committed stack fork has to copy into a child. */
+/* This thread's TEB, which is the only way to reach StackBase and StackLimit.
+ * Nothing calls it. */
 int* __teb()
 {
 	asm("call %__teb");
@@ -240,10 +240,11 @@ void* __ntdll_resolve(char* name)
 	return __ntdll_resolve_export(__ntdll_base_cache, name);
 }
 
-/* setjmp, in the one shape fork needs: it writes down where its caller would
- * have carried on and returns 0, and a thread pointed back at that spot with
- * EAX set to 1 comes up believing it returned 1.  See fork in process.c and
- * :__fork_setjmp in x86/libc-core.M1. */
+/* setjmp, in the one shape a fork that copies this program would need: it
+ * writes down where its caller would have carried on and returns 0, and a
+ * thread pointed back at that spot comes up believing it returned again.
+ * fork in process.c clones this process instead, and nothing calls this or
+ * the five functions after it.  See :__fork_setjmp in libc-core.M1. */
 int __fork_setjmp()
 {
 	asm("call %__fork_setjmp");

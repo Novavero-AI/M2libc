@@ -6,9 +6,10 @@
  *
  * Starting another program, and waiting for it.
  *
- * fork works here, and not by any of the means Windows offers for it.
+ * fork works here through RtlCloneUserProcess, with the child's thread set up
+ * by hand before it runs, because none of the means Windows offers for it
+ * works for a 32-bit program as Windows leaves it.
  *
- * Windows really does have a fork primitive, and it really does not work.
  * There are four ways in, and all four were measured on Windows 11 22621:
  *
  *   RtlCloneUserProcess    clones, and under WOW64 the child never comes back
@@ -46,15 +47,9 @@
  * meant to return in both processes, telling the child which it is by handing
  * it STATUS_PROCESS_CLONED where the parent gets STATUS_SUCCESS.
  * __clone_process below is that call, and what it does on Windows 11 is
- * written up there.  It is kept, and not called.
- *
- * What fork does instead is start this same program again and overwrite the
- * copy with this one: the way Cygwin has always done it, and possible here
- * for a reason particular to this bootstrap, which is that its image is at a
- * fixed address with everything -- code, globals, heap, even the stack the
- * kernel hands out -- laid out identically in every process that runs it.  So
- * one copy's memory means the same thing in another copy, and no fixups are
- * needed at all.  The whole of it is written up at fork below.
+ * written up there.  fork is __clone_process_wow64fix: the same call, with
+ * the clone's thread pointed at the loop that runs 32-bit code before it is
+ * let go, which is written up there.
  *
  * So four calls, and a caller wanting a child may say either what POSIX says
  * or the shorter thing Windows can do directly:
@@ -346,11 +341,8 @@ int __inheritable(int handle)
 /* __spawn, up to but not including letting the child go.
  *
  * A process Windows has created is suspended until something resumes its one
- * thread, and fork wants that gap: it has a whole address space to copy in and
- * a thread to point somewhere else before the child may run a single
- * instruction.  __spawn is this and then a resume; fork is this and then a
- * great deal more.  info comes back filled in -- Process at [1], Thread at
- * [2] -- and is the caller's to resume. */
+ * thread.  __spawn is this and then a resume.  info comes back filled in --
+ * Process at [1], Thread at [2] -- and is the caller's to resume. */
 int __spawn_suspended(char* file_name, char** argv, char** envp, int* info)
 {
 	int (*RtlCreateProcessParameters)(int, int, int, int, int, int, int, int, int, int);
@@ -521,16 +513,13 @@ int execve(char* file_name, char** argv, char** envp)
 	exit(status[0] / 256);
 }
 
-/* What fork would be, if the clone's child ever came back.
+/* The clone as Windows offers it, with nothing set up by hand.
  *
- * Kept, and not called.  fork does work now -- see fork below -- but by
- * copying one process into another rather than by asking Windows to clone
- * anything, and everything in this note is still true of the thing Windows
- * actually offers.  It is worth keeping for two reasons: a system where the
- * clone worked would get a cheaper fork than the one below for free, and the
- * measurements cost enough to find that throwing them away would be a waste.
- * What was measured on Windows 11 22621, from this and independently from
- * elsewhere:
+ * __clone_process_wow64fix falls back to this in a process with no 64-bit
+ * wow64cpu.dll, and that path is untested.  Everything in this note is true of
+ * the call as Windows offers it, and is why __clone_process_wow64fix sets the
+ * clone's thread up before letting it run.  What was measured on Windows 11
+ * 22621, from this and independently from elsewhere:
  *
  *   The parent gets STATUS_SUCCESS and a genuine cloned process -- tasklist
  *   shows two, and NtQueryInformationProcess reports the child as
@@ -1027,10 +1016,8 @@ int execve(char* file_name, char** argv, char** envp)
  *   across the clone syscall and never released on the child's side -- and
  *   clearing that one is the rest of the fix. __clone_process_wow64fix
  *   below is all of it, measured running to a real STATUS_PROCESS_CLONED
- *   return in the child, not just free of the fault above; fork lower in
- *   this file now prefers it, WOW64 or not, and falls back to copying only
- *   when the clone path itself cannot be made to work. x86/Development/
- *   wow64-clone-driver.md has the disassembly and every measurement in full.
+ *   return in the child, not just free of the fault above, and fork lower in
+ *   this file is __clone_process_wow64fix.
  *
  * wine does not export RtlCloneUserProcess at all, so it resolves to 0
  * there, which is checked rather than assumed: __ntdll_resolve returns 0
@@ -1087,7 +1074,7 @@ int __clone_process()
  * wow64fix_rc;" and every ordinary caller of fork() keeps seeing exactly
  * what POSIX promises, nothing more. It exists because this whole function
  * is a measured-on-one-VM, one-Windows-build fix layered over undocumented
- * WOW64 internals (see wow64-clone-driver.md sec 8-9) -- exactly the kind of
+ * WOW64 internals -- exactly the kind of
  * thing this file already keeps hard-won detail about in comments rather
  * than discarding once it works, and a future build, a future VM, or this
  * same VM after an update is the likeliest place this ever fails again. When
@@ -1129,27 +1116,26 @@ int __wow64fix_dup_status;
 int __wow64fix_qinfo_status;
 
 /* __clone_process_wow64fix: the same RtlCloneUserProcess as __clone_process
- * above, with the fix x86/Development/wow64-clone-driver.md sec 8-9 measured
- * applied before the child is ever let run.
+ * above, with the fix described here applied before the child is ever let
+ * run.
  *
  * __clone_process's own note works out where the unfixed clone dies: FS has
  * no base (fs:0x18 faults reading a TEB that is not there), because a clone's
  * initial thread resumes directly in 32-bit mode instead of going through the
  * 64-bit bring-up (LdrInitializeThunk -> ... -> wow64cpu!RunSimulatedCode)
  * that programs the FS base and leaves r13/r15 live for the first 32-bit
- * syscall. wow64-clone-driver.md sec 8 disassembles RunSimulatedCode and
- * finds that r12/r13/r15 are not inputs to it -- they are loaded from the
+ * syscall. Disassembling RunSimulatedCode shows that r12/r13/r15 are not
+ * inputs to it -- they are loaded from the
  * 64-bit TEB (gs:0x30) and the thread's CPU area (TEB+0x1488) on entry -- so a
  * thread does not need those registers set by hand, it only needs its native
  * RIP pointed at RunSimulatedCode's entry, wow64cpu!BTCpuSimulate (exported,
- * so nameable; RunSimulatedCode is not). Sec 9 built exactly that redirect as
- * a real 32-bit .exe on this project's win11 VM and it worked as far as user
- * mode can be asked to prove: the clone's FS became 0x53-based-on-a-real-TEB
- * (the fault this note's own child never got past), no exception of any kind
- * was seen, and the thread settled at a 32-bit ntdll syscall stub rather than
- * dying. What it had not done, as of that measurement, is come back and run
- * ordinary code -- see the note at the end of this function for exactly how
- * far short, and why this is kept and not wired into fork() yet.
+ * so nameable; RunSimulatedCode is not). That redirect, built as a real 32-bit
+ * .exe on a Windows 11 VM, worked as far as user mode can be asked to prove:
+ * the clone's FS became 0x53-based-on-a-real-TEB (the fault this note's own
+ * child never got past), no exception of any kind was seen, and the thread
+ * settled at a 32-bit ntdll syscall stub rather than dying.  It took one more
+ * step, step C.5 below, for the child to come back and run ordinary code; the
+ * note at the end of this function says how that was found.
  *
  * The redirect needs three things __clone_process does not:
  *
@@ -1179,7 +1165,7 @@ int __wow64fix_qinfo_status;
  *     Rsp, and SegCs = 0x33 -- then the ordinary (wow64-thunked)
  *     NtSetContextThread already used everywhere else in this file, asked
  *     for CONTEXT_INTEGER, with Eax
- *     written to STATUS_PROCESS_CLONED -- which, per sec 8.2's disassembly of
+ *     written to STATUS_PROCESS_CLONED -- which, per a disassembly of
  *     wow64cpu!BTCpuSetContext, also forces the CPU area's status word bit 0,
  *     the flag that makes the next RunSimulatedCode entry reprogram FS rather
  *     than skip straight to 32-bit code with whatever was already there. */
@@ -1208,23 +1194,17 @@ int __qadd64(int lo, int hi, int delta, int* hi_out)
 
 /* __wow64_align16: round a heap pointer up to the next 16-byte boundary.
  *
- * calloc's own bump allocator (M2libc's stdlib.c, via _malloc_brk) makes no
- * alignment promise at all beyond whatever __heap_start happens to be --
- * measured directly on this VM (Development/align-probe.c, not kept), three
- * successive callocs of 4, 4 and 48 bytes came back 6 mod 8, not even
- * 4-byte-aligned, every time. Every buffer this file hands to a WOW64
- * 64-bit call -- NtWow64QueryInformationProcess64's PROCESS_BASIC_
- * INFORMATION64, NtWow64ReadVirtualMemory64's PULONG64 byte count, and the
- * CONTEXT_AMD64 buffers the heaven's-gate calls in __clone_process_wow64fix
- * use -- holds 64-bit fields the kernel probes for natural alignment,
- * answering STATUS_DATATYPE_MISALIGNMENT (0x80000002) rather than fixing it
- * up: __wow64fix_qinfo_status read exactly that value, measured against
- * __wow64_selfpeb's unaligned `info` buffer, which is what sent
- * __wow64fix_fail_at to 2 every time this was run before this function
- * existed. 16 rather than 8 matches fork()'s own already-working
- * CONTEXT_AMD64 rounding elsewhere in this file (ctx_raw, below). Every
- * caller must over-allocate 15 extra bytes so the rounded-up address still
- * has room for what it asked for. */
+ * calloc hands out 8-byte aligned memory (stdlib.c's __windows__
+ * _malloc_brk). Every buffer this file hands to a WOW64 64-bit call --
+ * NtWow64QueryInformationProcess64's PROCESS_BASIC_INFORMATION64,
+ * NtWow64ReadVirtualMemory64's PULONG64 byte count, and the CONTEXT_AMD64
+ * buffers the heaven's-gate calls in __clone_process_wow64fix use -- holds
+ * 64-bit fields the kernel probes for natural alignment, answering
+ * STATUS_DATATYPE_MISALIGNMENT (0x80000002) rather than fixing it up:
+ * __wow64fix_qinfo_status read exactly that value, measured against
+ * __wow64_selfpeb's `info` buffer when it was unaligned. A CONTEXT_AMD64 wants
+ * 16, which covers the rest. Every caller must over-allocate 15 extra bytes
+ * so the rounded-up address still has room for what it asked for. */
 int __wow64_align16(int raw)
 {
 	raw = raw + 15;
@@ -1236,7 +1216,7 @@ int __wow64_align16(int raw)
  * and NtWow64QueryInformationProcess64 both answer STATUS_INVALID_HANDLE
  * (0xc0000008) to -1, the NtCurrentProcess pseudo-handle every other Nt* call
  * in this file accepts without complaint -- measured directly, with a gcc
- * stand-in harness (/tmp/claude/wow64demo/m2check.c) that first came back
+ * stand-in harness that first came back
  * with an all-zero PEB and no visible error, then, once __wow64_rd64 was
  * made to report its own NTSTATUS, showed 0xc0000008 on every call until the
  * pseudo-handle was swapped for a real one. NtDuplicateObject already does
@@ -1291,8 +1271,7 @@ int __wow64_scratch_hi[1];
  * recursive, this whole fix runs straight through on one thread -- so one of
  * each, allocated the first time and reused after, is exactly as correct as
  * a fresh calloc every time and, per __wow64_scratch_hi's note above, is the
- * other half of what a plain fork-many-test.c run (Development/
- * fork-many-probe.c, kept locally while measuring this) showed: brk()
+ * other half of what a plain fork-many-test.c run showed: brk()
  * climbing about 3.4MB per fork() call, all of it these two families of
  * throwaway buffers, enough to walk this image's fixed 128MB heap section
  * off the end in under 40 forks. Cached, the same call site allocates three
@@ -1387,7 +1366,7 @@ int __wow64_rd64_word(int lo, int hi)
  * word to base_hi_out, or returns 0 (writing 0) if the list runs out first.
  * LDR_DATA_TABLE_ENTRY64 offsets (InLoadOrderLinks +0x00, DllBase +0x30,
  * BaseDllName.Length +0x58, BaseDllName.Buffer +0x60) and PEB64.Ldr (+0x18)
- * are the standard ones photographed in wow64-clone-driver.md sec 9.2. */
+ * are the standard ones. */
 int __wow64_find_module(int peb_lo, int peb_hi, char* want, int* base_hi_out)
 {
 	int pebldr_lo; int pebldr_hi;
@@ -1526,16 +1505,15 @@ int __wow64_resolve_export(int base_lo, int base_hi, char* name, int* va_hi_out)
 	return 0;
 }
 
-/* The heaven's-gate trampoline itself: a fixed 64-bit payload
- * (x86_64-linux-gnu-as + objcopy -O binary of x86/Development's gate.S,
- * bytes identical to /tmp/claude/wow64demo/gate.bin, validated on the win11
- * VM per wow64-clone-driver.md sec 9.1) sitting in a page this process
- * allocates PAGE_EXECUTE_READWRITE. Layout (byte offsets, matching gate.S's
- * layout.inc, unchanged by the port from C to this dialect since it is
- * machine code either way): 0x000 a 32-bit entry stub; 0x040 a data area of
- * six 8-byte slots (Target, Arg1..Arg4, Result -- Arg5 unused here); 0x0C0 the
- * 64-bit payload; 0x120 a 32-bit return stub. calloc already zeroes the page,
- * so only the 89 non-zero bytes out of 289 are written here.
+/* The heaven's-gate trampoline itself: a fixed 64-bit payload sitting in a
+ * page this process allocates PAGE_EXECUTE_READWRITE. Layout (byte offsets):
+ * 0x000 a 32-bit entry stub, a far jump to 0x33:0x0C0; 0x040 a data area of
+ * seven 8-byte slots (Target, Arg1..Arg5, Result -- __gate_call sets Target,
+ * Arg1 and Arg2, and the rest stay zero); 0x0C0 the 64-bit payload, which
+ * loads Arg1..Arg4 into rcx, rdx, r8 and r9 and Arg5 onto an aligned stack,
+ * calls Target, stores rax in Result and far-returns to 0x23:0x120; 0x120 a
+ * 32-bit return stub. NtAllocateVirtualMemory hands the page out zeroed, so
+ * only the 89 non-zero bytes out of 289 are written here.
  *
  * Cached in a global the same way __wow64_selfhandle above caches its handle:
  * the trampoline bytes below never change from one call to the next, so
@@ -1682,9 +1660,8 @@ int __wow64_selfpeb(int* hi_out)
 /* CONTEXT_AMD64 byte offsets used below (ContextFlags +0x30, SegCs +0x38,
  * SegSs +0x42, EFlags +0x44, Rsp +0x98, Rip +0xF8), carried as word indices
  * since this file addresses every buffer as int*: divide by 4. Values from
- * mingw-w64's winnt.h struct _CONTEXT (x86_64), cross-checked in
- * wow64-clone-driver.md sec 9.2/9.3 against a live read on the VM. The buffer
- * is 0x4D0 bytes, same as demo.c's CTX_SIZE. */
+ * mingw-w64's winnt.h struct _CONTEXT (x86_64), cross-checked against a live
+ * read on the VM. The buffer is 0x4D0 bytes. */
 int __clone_process_wow64fix()
 {
 	int (*RtlCloneUserProcess)(int, int, int, int, int);
@@ -1729,7 +1706,7 @@ int __clone_process_wow64fix()
 	 * process under a 64-bit kernel resumes a cloned thread directly in
 	 * 32-bit mode instead of through the 64-bit bring-up that would have
 	 * programmed its FS base and put it inside wow64cpu!RunSimulatedCode
-	 * (see __clone_process's own note, and wow64-clone-driver.md sec 1-2).
+	 * (see __clone_process's own note).
 	 * On genuine 32-bit Windows there is no 64-bit kernel underneath, no
 	 * simulator to enter, no compat-mode FS-base indirection to miss -- a
 	 * clone's thread gets its FS base the same native way any other 32-bit
@@ -1776,7 +1753,7 @@ int __clone_process_wow64fix()
 	 *                               RTL_CLONE_PROCESS_FLAGS_INHERIT_HANDLES,
 	 *                               NULL, NULL, NULL, info) -- 3, not the bare
 	 *                               CREATE_SUSPENDED (1) this used to pass.
-	 * wow64-clone-driver.md sec 8-9's own validation never opened a file or
+	 * The fix's first validation never opened a file or
 	 * wrote through an inherited handle in the child, so CREATE_SUSPENDED
 	 * alone was never wrong for what it measured; fork() actually running
 	 * ordinary programs is what exposed the gap. Measured directly:
@@ -1787,10 +1764,9 @@ int __clone_process_wow64fix()
 	 * fixed-up clone in line with the one call in this file that already got
 	 * it right. */
 	rc = RtlCloneUserProcess(info, 0, 0, 0, 3);
-	if(0x129 == rc) return 0;   /* the clone ran with no fix at all -- never
-	                             * observed on this project's VM, kept as a
-	                             * cheap check in case a future Windows build
-	                             * no longer needs any of this. */
+	if(0x129 == rc) return 0;   /* STATUS_PROCESS_CLONED: this is the child,
+	                             * which comes back here once step D lets it
+	                             * go, with the Eax step C gives it. */
 	if(0 != rc) { __wow64fix_fail_at = 8; return -1; }
 	thread = info[2];
 	/* RTL_USER_PROCESS_INFORMATION.Process: the child's process handle. */
@@ -1837,8 +1813,8 @@ int __clone_process_wow64fix()
 	 * already uses elsewhere, on the 32-bit CPU-area CONTEXT, asking only for
 	 * CONTEXT_INTEGER|CONTEXT_CONTROL|CONTEXT_SEGMENTS (0x10007, the same
 	 * CONTEXT_FULL fork() below already uses) with Eax forced to
-	 * STATUS_PROCESS_CLONED. wow64-clone-driver.md sec 8.2's disassembly of
-	 * BTCpuSetContext is why this is enough: asking for that flag set is what
+	 * STATUS_PROCESS_CLONED. A disassembly of BTCpuSetContext is why this is
+	 * enough: asking for that flag set is what
 	 * makes it OR bit 0 into the CPU area's status word, which is the same
 	 * bit RunSimulatedCode's own entry tests to decide whether to reprogram
 	 * FS. Get first, so nothing already correct in the CPU-area CONTEXT
@@ -1869,10 +1845,10 @@ int __clone_process_wow64fix()
 	}
 
 	/* -- Step C.5: zero RtlCloneUserProcess's own internal SRW lock, in the
-	 * CHILD's copy, before it ever runs an instruction. wow64-clone-driver.md
-	 * sec 10's CFG walk of RtlCloneUserProcess (radare2 agf/pdf, not a linear
-	 * read) found the parent's own call -- CREATE_SUSPENDED, no
-	 * NO_SYNCHRONIZE -- takes the branch that does
+	 * CHILD's copy, before it ever runs an instruction. A CFG walk of
+	 * RtlCloneUserProcess (radare2 agf/pdf, not a linear read) found the
+	 * parent's own call -- CREATE_SUSPENDED, no NO_SYNCHRONIZE -- takes the
+	 * branch that does
 	 * RtlAcquireSRWLockExclusive(ntdll+0x12d534) then
 	 * RtlAcquireSRWLockExclusive(ntdll+0x12d52c), in that order, and holds
 	 * BOTH across the NtCreateUserProcess syscall inside it, releasing them
@@ -1895,7 +1871,7 @@ int __clone_process_wow64fix()
 	 * stuck on.
 	 *
 	 * ntdll.dll carries no relocations for this component (confirmed
-	 * unchanging across repeated runs, wow64-clone-driver.md sec 9.2), so the
+	 * unchanging across repeated runs), so the
 	 * parent's own already-resolved RtlCloneUserProcess pointer and this
 	 * process's own copy of ntdll.dll sit at the same offset from each other
 	 * as the child's do; RtlCloneUserProcess's RVA (0xbaa60) and the lock's
@@ -1925,17 +1901,16 @@ int __clone_process_wow64fix()
 	/* forwards: NtResumeThread(thread, NULL) */
 	NtResumeThread(0, thread);
 
-	/* The thread handle has done its one job, same as __spawn's own (above)
-	 * and fork()'s spawn+copy fallback's own (below) -- both already close
-	 * theirs; this one leaked it on every successful clone until now, one
-	 * handle per fork(). */
+	/* The thread handle has done its one job, same as __spawn's own (above),
+	 * which already closes its; this one leaked it on every successful clone
+	 * until now, one handle per fork(). */
 	NtClose = __ntdll_resolve("NtClose");
 	NtClose(thread);
 
 	return child;
 }
 
-/* Measured on this project's win11 VM (wow64-clone-driver.md sec 9.3-9.4):
+/* Measured on this project's win11 VM:
  * every step above took -- Step A read back a sane native context, Step B's
  * Rip/SegCs read back exactly as written, Step C's Eax read back 0x129 --
  * and the clone, resumed, threw no exception at all across two 3-4 second
@@ -1993,17 +1968,13 @@ int __clone_process_wow64fix()
  * cleanly, and the clone reaches ordinary running code -- not just "no more
  * exceptions."
  *
- * This is why the function is wired into fork() below now, ahead of the
- * spawn+copy path, whenever RtlCloneUserProcess resolves (it is absent on
- * Wine). A failure return here after the clone succeeds terminates the
- * half-set-up child first, so falling back to spawn+copy never leaves an
- * orphaned suspended process behind. The spawn+copy path itself is
- * untouched and is still what runs whenever RtlCloneUserProcess fails to
- * resolve, or whenever this function returns -1 for any other reason. */
+ * This is why fork() below is this function. A failure return here after
+ * the clone succeeds terminates the half-set-up child first, so a failed
+ * fork() never leaves an orphaned suspended process behind. */
 
 /* This process's own image path, out of the PEB, narrowed the way everything
- * else in this port narrows.  fork needs it because the only way to get a
- * child with a working address space is to start this same program again. */
+ * else in this port narrows.  Nothing calls it: fork clones this process
+ * rather than starting the program again. */
 char* __self_path()
 {
 	int* slot;
