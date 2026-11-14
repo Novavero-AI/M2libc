@@ -129,9 +129,9 @@ void* __heap_start()
 
 /* exit is what C calls; _exit is what the layer below calls.  M2libc declares
  * both and defines neither -- on Linux they come from libc-full.M1's _start,
- * which aliases them onto the same syscall.
+ * where exit calls __kill_io and falls into _exit's syscall.
  *
- * They are not aliases here, because M2libc's stdout is buffered 512 bytes at
+ * exit does the same here, because M2libc's stdout is buffered 512 bytes at
  * a time and exiting without flushing it throws away whatever has not reached
  * the handle yet.  __kill_io is stdio.c's own flush-everything, the same one
  * upstream's libc-full.M1 calls on the way out; it is declared here because

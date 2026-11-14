@@ -145,7 +145,7 @@ void* __heap_start()
 
 long _malloc_ptr;
 
-/* The image runs to 16MB and everything past the end of the file is mapped,
+/* The image runs to 128MB and everything past the end of the file is mapped,
  * writable and already zero, so there is no break to move and no way for this
  * to fail.  Nothing is ever freed; the heap only ever grows.  Running off the
  * end of the image would fault, and there is no layer here that could say so

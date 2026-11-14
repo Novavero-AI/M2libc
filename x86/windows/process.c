@@ -475,8 +475,8 @@ int waitpid(int pid, int* status_ptr, int options)
 
 /* Start a program, wait for it, and answer with what it exited with.
  *
- * This is the shape uefi/uefi.c gives the same operation, and it is deliberate
- * that the name matches: a caller that cannot fork is written against spawn,
+ * This is the shape uefi/unistd.c gives the same operation, and the name
+ * matches on purpose: a caller that cannot fork is written against spawn,
  * and UEFI cannot fork either.  kaem has exactly one #ifdef in it for this,
  * and reaching for the same name means that one #ifdef answers for both.
  *

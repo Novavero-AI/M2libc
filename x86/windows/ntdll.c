@@ -101,7 +101,7 @@ int __ntdll_rb(int addr)
  * at a time -- the in-process, native-bitness counterpart of process.c's
  * __wow64_find_module, needing no cross-bitness read since this is the same
  * process's own memory. PEB->Ldr is at +0x0C and Ldr->InMemoryOrderModuleList's
- * head is at +0x14, the same two fields libc-core.M1's hand-written
+ * head is at +0x14, the same two fields ntdll-i386.hex2's hand-written
  * find_ntdll and x86/Development/stage0asm.py's FIND_NTDLL already rely on.
  * Walking the list keeps a pointer to each entry's InMemoryOrderLinks field
  * (LDR_DATA_TABLE_ENTRY +0x08) rather than the entry's own base, which is why
@@ -220,8 +220,8 @@ int __ntdll_resolve_export(int base, char* name)
 /* One ntdll routine, resolved by name rather than by resolve_all's fixed
  * slot table -- the portable replacement ntdll-slots.h's NT_* constants are
  * meant to give way to, once a program is built with a C compiler at all
- * (hex0 through M0 have none yet and must go on using resolve_all; see
- * x86/Development/gen_ntdll.py's own comment on that). ntdll.dll's base is
+ * (hex0 through cc_x86 have none, and M0 and cc_x86 go on using resolve_all;
+ * see x86/Development/pe32shared.py's comment on that). ntdll.dll's base is
  * cached, since every caller wants a different export out of the same
  * module. Returns 0 if ntdll.dll's export table has no such name -- ntdll
  * always resolves, so a 0 here rather than at __ntdll_find_module's return
