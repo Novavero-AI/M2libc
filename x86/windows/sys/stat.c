@@ -136,7 +136,7 @@ int chmod(char* pathname, int mode)
 	 *                        NULL, 0) */
 	if(0 != NtCreateFile(0, 0, 0x60, 5, 1, 0x80, 0, iosb, stream, 0x40100000, handle)) return -1;
 
-	h = handle[0];                 /* not in the argument list: see ntdll.c */
+	h = handle[0];
 	one = "1";
 	NtWriteFile = __ntdll_resolve("NtWriteFile");
 	/* forwards: NtWriteFile(h, NULL, NULL, NULL, iosb, one, 1, NULL, NULL) */
@@ -183,7 +183,7 @@ int mkdir(char* a, mode_t b)
 	if(0 != NtCreateFile(0, 0, 0x21, 2, 3, 0x80, 0, iosb, oa, 0x00100001, handle)) return -1;
 
 	NtClose = __ntdll_resolve("NtClose");
-	h = handle[0];                 /* not in the argument list: see ntdll.c */
+	h = handle[0];
 	NtClose(h);
 	return 0;
 }

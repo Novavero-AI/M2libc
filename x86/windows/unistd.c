@@ -202,7 +202,7 @@ int chdir(char* path)
 	RtlSetCurrentDirectory_U = __ntdll_resolve("RtlSetCurrentDirectory_U");
 	/* The one ntdll call here that wants a DOS path rather than an NT one:
 	 * it does the conversion itself, and keeps the DOS path for getcwd. */
-	dos = __dosustring(path);      /* not in the argument list: see ntdll.c */
+	dos = __dosustring(path);
 	if(0 != RtlSetCurrentDirectory_U(dos)) return -1;
 	return 0;
 }
@@ -229,7 +229,7 @@ int _getcwd(char* buf, int size)
 	int i;
 
 	w = calloc(size + 1, 2);
-	room = 2 * size;               /* not in the argument list: see ntdll.c */
+	room = 2 * size;
 	RtlGetCurrentDirectory_U = __ntdll_resolve("RtlGetCurrentDirectory_U");
 	/* forwards: RtlGetCurrentDirectory_U(room, w) */
 	bytes = RtlGetCurrentDirectory_U(w, room);

@@ -136,7 +136,7 @@
  * detail: wine agreeing is not evidence that Windows will.
  *
  * The calling rules for everything below are in x86/windows/ntdll.c: the
- * arguments go in backwards, and none of them may write EDX.
+ * arguments go in backwards.
  */
 
 #ifndef __PROCESS_C
@@ -1793,15 +1793,7 @@ int __clone_process_wow64fix()
 	                             * no longer needs any of this. */
 	if(0 != rc) { __wow64fix_fail_at = 8; return -1; }
 	thread = info[2];
-	/* Hoisted once, here, and used everywhere below instead of info[1]
-	 * directly: this dialect's calling convention keeps the target of an
-	 * indirect call in EDX while it evaluates that call's arguments (see
-	 * libc-core.M1's own note on __ntdll), and info[1] as an argument is an
-	 * array subscript -- a multiply -- which clobbers EDX before the call it
-	 * is an argument to ever runs. check_fnptr_args.py already flags every
-	 * such site; this is the fix, not just a suppression, matching how
-	 * fork() below already hoists the same field into a local called
-	 * child. */
+	/* RTL_USER_PROCESS_INFORMATION.Process: the child's process handle. */
 	child = info[1];
 
 	/* -- Step A: native NtGetContextThread on the never-run initial thread -- */

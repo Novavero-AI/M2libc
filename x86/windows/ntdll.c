@@ -9,10 +9,9 @@
  *
  * Calling ntdll from C
  * --------------------
- * x86/ntdll-i386.hex2 resolves each routine out of ntdll's export table into a
- * numbered slot -- ntdll-slots.h says which -- and __ntdll returns the address
- * in one.  What comes back is called through a function pointer, and there are
- * two things about that which are not obvious and are not optional:
+ * __ntdll_resolve, below, finds each routine by name in ntdll's export table,
+ * and what it returns is called through a function pointer.  There are two
+ * things about that which are not obvious and are not optional:
  *
  *   The arguments go in backwards.  M2-Planet pushes the first argument
  *   first, so it ends up furthest from the stack pointer, and a stdcall callee
@@ -22,19 +21,7 @@
  *   Nothing else has to be done about stdcall.  ntdll pops its own arguments,
  *   which would strand a caller that popped them again -- but M2-Planet saves
  *   the stack pointer in EBP before pushing and restores it from there
- *   afterwards, so it never adds back what it pushed.  See x86/libc-core.M1.
- *
- *   No argument may touch EDX.  M2-Planet keeps the pointer it is about to
- *   call in EDX while it evaluates the arguments and never puts it back, so
- *   anything in the argument list that writes EDX sends the outer call to
- *   whatever is left there -- in practice zero, and a jump to address zero.
- *   Three things write it: a function call; `*`, `/` or `%`, which compile to
- *   imul and idiv; and subscripting an array, because that is a multiply by
- *   the element size whether or not the index is a constant.  So every argument to a call through a pointer
- *   here is a local or a constant, and anything computed -- including
- *   doubling a length for UTF-16 -- is worked out into a local on the line
- *   before.  That is a property of M2-Planet's code generator rather than of
- *   these routines, and holds for every function pointer call in this port.
+ *   afterwards, so it never adds back what it pushed.
  *
  * Filenames
  * ---------
@@ -347,7 +334,7 @@ int* __ntobject(char* path)
 
 	RtlDosPathNameToNtPathName_U = __ntdll_resolve("RtlDosPathNameToNtPathName_U");
 	name = calloc(2, 4);
-	wide = __widen(path);          /* not in the argument list: see above */
+	wide = __widen(path);
 
 	/* forwards: RtlDosPathNameToNtPathName_U(wide, name, NULL, NULL) */
 	if(0 == RtlDosPathNameToNtPathName_U(0, 0, name, wide)) return NULL;
